@@ -145,6 +145,22 @@ textarea {
   color: rgba(255, 255, 255, 0.4);
 }
 
+#match-result-modal .modal-content {
+  text-align: center;
+}
+
+#match-result-title.match-result-victory {
+  color: #6fe3a0;
+}
+
+#match-result-title.match-result-defeat {
+  color: #ff9b9b;
+}
+
+#match-result-summary {
+  color: rgba(255, 255, 255, 0.82);
+}
+
 .hidden {
   display: none !important;
 }
@@ -329,6 +345,18 @@ textarea {
 .panel button:hover {
   transform: translateY(-2px);
   box-shadow: 0 10px 20px rgba(44, 123, 229, 0.3);
+}
+
+.panel button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+  transform: none;
+  box-shadow: none;
+}
+
+.panel button:disabled:hover {
+  transform: none;
+  box-shadow: none;
 }
 
 #status {

@@ -20,7 +20,38 @@ import {
   getTechnologyDescriptionForTier as getDynamicTechnologyDescription,
 } from "./shared/constants.js";
 
-const socket = io();
+const RECONNECT_TOKEN_STORAGE_KEY = "rts_reconnect_token";
+
+function loadReconnectToken() {
+  try {
+    const token = window.localStorage.getItem(RECONNECT_TOKEN_STORAGE_KEY);
+    return typeof token === "string" ? token.trim() : "";
+  } catch {
+    return "";
+  }
+}
+
+let reconnectToken = loadReconnectToken();
+
+function saveReconnectToken(token) {
+  const normalized = typeof token === "string" ? token.trim() : "";
+  reconnectToken = normalized;
+  try {
+    if (normalized) {
+      window.localStorage.setItem(RECONNECT_TOKEN_STORAGE_KEY, normalized);
+    } else {
+      window.localStorage.removeItem(RECONNECT_TOKEN_STORAGE_KEY);
+    }
+  } catch {
+    // Ignore storage failures (private mode or blocked storage).
+  }
+}
+
+const socket = io({
+  auth: (cb) => {
+    cb(reconnectToken ? { reconnectToken } : {});
+  },
+});
 
 socket.on("connect", () => {
   socket.emit("requestLobbies");
@@ -55,6 +86,10 @@ const cancelLobbyButton = document.getElementById("cancel-lobby");
 const resignModal = document.getElementById("resign-modal");
 const confirmResignButton = document.getElementById("confirm-resign");
 const cancelResignButton = document.getElementById("cancel-resign");
+const matchResultModal = document.getElementById("match-result-modal");
+const matchResultTitleEl = document.getElementById("match-result-title");
+const matchResultSummaryEl = document.getElementById("match-result-summary");
+const matchReturnLobbyButton = document.getElementById("match-return-lobby");
 const statusEl = document.getElementById("status");
 const resourcesEl = document.getElementById("resources");
 const idleVillagersEl = document.getElementById("idle-villagers");
@@ -505,6 +540,12 @@ if (resignModal) {
   });
 }
 
+if (matchReturnLobbyButton) {
+  matchReturnLobbyButton.addEventListener("click", () => {
+    returnToLobbyAfterMatch();
+  });
+}
+
 socket.on("queue", () => {
   statusEl.textContent = "Waiting for another player...";
   isSearching = true;
@@ -580,6 +621,22 @@ function isLobbyReadyToStart(lobby) {
   return teams.size >= 2;
 }
 
+function updateStartLobbyButtonState(lobby = currentLobby) {
+  if (!startLobbyButton) return;
+  if (!lobby || !isLobbyHost) {
+    startLobbyButton.disabled = true;
+    startLobbyButton.title = lobby
+      ? "Only the host can start the match."
+      : "";
+    return;
+  }
+  const ready = isLobbyReadyToStart(lobby);
+  startLobbyButton.disabled = !ready;
+  startLobbyButton.title = ready
+    ? ""
+    : "Need at least two players on different teams.";
+}
+
 function setLobbyModal(open) {
   if (!lobbyModal) return;
   lobbyModal.classList.toggle("hidden", !open);
@@ -592,6 +649,84 @@ function setLobbyModal(open) {
 function setResignModal(open) {
   if (!resignModal) return;
   resignModal.classList.toggle("hidden", !open);
+}
+
+function setMatchResultModal(open) {
+  if (!matchResultModal) return;
+  matchResultModal.classList.toggle("hidden", !open);
+}
+
+function resetMatchResultContent() {
+  if (matchResultTitleEl) {
+    matchResultTitleEl.textContent = "Match Over";
+    matchResultTitleEl.classList.remove("match-result-victory", "match-result-defeat");
+  }
+  if (matchResultSummaryEl) {
+    matchResultSummaryEl.textContent = "Match complete.";
+  }
+}
+
+function showMatchResultContent(title, summary, tone = "") {
+  if (matchResultTitleEl) {
+    matchResultTitleEl.textContent = title || "Match Over";
+    matchResultTitleEl.classList.remove("match-result-victory", "match-result-defeat");
+    if (tone === "victory") {
+      matchResultTitleEl.classList.add("match-result-victory");
+    } else if (tone === "defeat") {
+      matchResultTitleEl.classList.add("match-result-defeat");
+    }
+  }
+  if (matchResultSummaryEl) {
+    matchResultSummaryEl.textContent = summary || "Match complete.";
+  }
+}
+
+function returnToLobbyAfterMatch() {
+  setMatchResultModal(false);
+  resetMatchResultContent();
+  overlay.classList.remove("hidden");
+  statusEl.textContent = "Idle";
+  isSearching = false;
+  allowCheats = false;
+  if (playButton) playButton.textContent = "Play";
+  currentLobby = null;
+  if (leaveLobbyButton) leaveLobbyButton.disabled = true;
+  if (createLobbyButton) createLobbyButton.disabled = false;
+  if (lobbyNameInput) lobbyNameInput.disabled = false;
+  updateStartLobbyButtonState(null);
+  socket.emit("requestLobbies");
+  setLobbyView(false);
+  setLobbyModal(false);
+  setResignModal(false);
+  if (bottomBar) bottomBar.classList.add("hidden");
+  selectedUnits = [];
+  selectedBuilding = null;
+  selectedBuildings = [];
+  selectedResource = null;
+  selectedRelic = null;
+  selectionBox = null;
+  isDraggingSelection = false;
+  attackMoveArmed = false;
+  dropRelicArmed = false;
+  healArmed = false;
+  repairArmed = false;
+  buildMode = null;
+  pendingCheat = null;
+  unitRenderState.clear();
+  unitFacing.clear();
+  unitDamageTime.clear();
+  unitRecoverTime.clear();
+  buildingDamageTime.clear();
+  buildingRepairTime.clear();
+  projectiles.length = 0;
+  projectileImpacts.length = 0;
+  minimapAlerts.length = 0;
+  tempVisionReveals.length = 0;
+  relics = [];
+  fogVisible = new Uint8Array(map.width * map.height);
+  fogExplored = new Uint8Array(map.width * map.height);
+  updateSelectionUI();
+  renderCheatBar();
 }
 
 function submitLobbyCreate() {
@@ -677,11 +812,7 @@ function renderLobbyRoom(lobby) {
 
 socket.on("lobbyList", (list) => {
   renderLobbyList(list || []);
-  if (currentLobby && startLobbyButton) {
-    const lobby = (list || []).find((entry) => entry.id === currentLobby.id);
-    const ready = isLobbyReadyToStart(currentLobby);
-    startLobbyButton.disabled = !(isLobbyHost && ready);
-  }
+  if (currentLobby) updateStartLobbyButtonState(currentLobby);
 });
 
 socket.on("lobbyJoined", (lobby) => {
@@ -692,10 +823,7 @@ socket.on("lobbyJoined", (lobby) => {
   if (leaveLobbyButton) leaveLobbyButton.disabled = false;
   if (createLobbyButton) createLobbyButton.disabled = true;
   if (lobbyNameInput) lobbyNameInput.disabled = true;
-  if (startLobbyButton) {
-    const ready = isLobbyReadyToStart(lobby);
-    startLobbyButton.disabled = !(isLobbyHost && ready);
-  }
+  updateStartLobbyButtonState(lobby);
   statusEl.textContent = `Lobby: ${lobby.name}`;
   setLobbyView(true);
   setLobbyModal(false);
@@ -711,7 +839,7 @@ socket.on("lobbyLeft", () => {
   if (leaveLobbyButton) leaveLobbyButton.disabled = true;
   if (createLobbyButton) createLobbyButton.disabled = false;
   if (lobbyNameInput) lobbyNameInput.disabled = false;
-  if (startLobbyButton) startLobbyButton.disabled = true;
+  updateStartLobbyButtonState(null);
   statusEl.textContent = "Idle";
   setLobbyView(false);
   setLobbyModal(false);
@@ -725,13 +853,15 @@ socket.on("lobbyUpdate", (lobby) => {
   allowCheats = !!lobby.allowCheats;
   selectedColorId = lobby.colorAssignments?.[socket.id] || null;
   renderLobbyRoom(lobby);
-  if (startLobbyButton) {
-    const ready = isLobbyReadyToStart(lobby);
-    startLobbyButton.disabled = !(isLobbyHost && ready);
-  }
+  updateStartLobbyButtonState(lobby);
 });
 
 socket.on("matchStart", (payload) => {
+  if (typeof payload?.reconnectToken === "string" && payload.reconnectToken.trim()) {
+    saveReconnectToken(payload.reconnectToken);
+  }
+  setMatchResultModal(false);
+  resetMatchResultContent();
   overlay.classList.add("hidden");
   isSearching = false;
   if (playButton) playButton.textContent = "Play";
@@ -739,7 +869,7 @@ socket.on("matchStart", (payload) => {
   if (leaveLobbyButton) leaveLobbyButton.disabled = true;
   if (createLobbyButton) createLobbyButton.disabled = false;
   if (lobbyNameInput) lobbyNameInput.disabled = false;
-  if (startLobbyButton) startLobbyButton.disabled = true;
+  updateStartLobbyButtonState(null);
   setLobbyView(false);
   setLobbyModal(false);
   setResignModal(false);
@@ -959,53 +1089,34 @@ socket.on("stateUpdate", (payload) => {
 });
 
 socket.on("matchEnded", (payload = {}) => {
-  overlay.classList.remove("hidden");
-  if (payload.reason === "team_victory" && Number.isFinite(payload.winnerTeam)) {
-    statusEl.textContent = `Team ${payload.winnerTeam} wins. Choose multiplayer or singleplayer to start again.`;
+  saveReconnectToken("");
+  const winningTeam = Number(payload?.winnerTeam);
+  const hasWinningTeam =
+    payload?.reason === "team_victory" && Number.isFinite(winningTeam);
+  const localTeam = Number(players.find((p) => p.index === playerIndex)?.team);
+  if (hasWinningTeam && Number.isFinite(localTeam)) {
+    if (localTeam === winningTeam) {
+      showMatchResultContent("Victory", `Winning Team: Team ${winningTeam}.`, "victory");
+    } else {
+      showMatchResultContent("Defeat", `Winning Team: Team ${winningTeam}.`, "defeat");
+    }
+    statusEl.textContent = `Team ${winningTeam} wins.`;
+  } else if (hasWinningTeam) {
+    showMatchResultContent(
+      `Team ${winningTeam} Wins`,
+      `Winning Team: Team ${winningTeam}.`
+    );
+    statusEl.textContent = `Team ${winningTeam} wins.`;
   } else {
-    statusEl.textContent = "Match ended. Choose multiplayer or singleplayer to start again.";
+    showMatchResultContent("Match Over", "No winning team was determined.");
+    statusEl.textContent = "Match ended.";
   }
-  isSearching = false;
-  allowCheats = false;
-  if (playButton) playButton.textContent = "Play";
-  currentLobby = null;
-  if (leaveLobbyButton) leaveLobbyButton.disabled = true;
-  if (createLobbyButton) createLobbyButton.disabled = false;
-  if (lobbyNameInput) lobbyNameInput.disabled = false;
-  if (startLobbyButton) startLobbyButton.disabled = true;
-  socket.emit("requestLobbies");
-  setLobbyView(false);
-  setLobbyModal(false);
   setResignModal(false);
-  if (bottomBar) bottomBar.classList.add("hidden");
-  selectedUnits = [];
-  selectedBuilding = null;
-  selectedBuildings = [];
-  selectedResource = null;
-  selectedRelic = null;
-  selectionBox = null;
-  isDraggingSelection = false;
-  attackMoveArmed = false;
-  dropRelicArmed = false;
-  healArmed = false;
-  repairArmed = false;
-  buildMode = null;
-  pendingCheat = null;
-  unitRenderState.clear();
-  unitFacing.clear();
-  unitDamageTime.clear();
-  unitRecoverTime.clear();
-  buildingDamageTime.clear();
-  buildingRepairTime.clear();
-  projectiles.length = 0;
-  projectileImpacts.length = 0;
-  minimapAlerts.length = 0;
-  tempVisionReveals.length = 0;
-  relics = [];
-  fogVisible = new Uint8Array(map.width * map.height);
-  fogExplored = new Uint8Array(map.width * map.height);
-  updateSelectionUI();
-  renderCheatBar();
+  if (!matchResultModal) {
+    returnToLobbyAfterMatch();
+    return;
+  }
+  setMatchResultModal(true);
 });
 
 socket.on("attackAlert", (payload) => {

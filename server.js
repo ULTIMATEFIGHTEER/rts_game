@@ -2,6 +2,7 @@ import express from "express";
 import { createServer } from "http";
 import { Server as SocketServer } from "socket.io";
 import path from "path";
+import { randomBytes } from "crypto";
 import { fileURLToPath } from "url";
 import {
   MAP,
@@ -25,9 +26,16 @@ import {
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+const PLAYER_RECONNECT_GRACE_MS = 30_000;
+
 const app = express();
 const httpServer = createServer(app);
-const io = new SocketServer(httpServer);
+const io = new SocketServer(httpServer, {
+  connectionStateRecovery: {
+    maxDisconnectionDuration: PLAYER_RECONNECT_GRACE_MS,
+    skipMiddlewares: true,
+  },
+});
 
 app.use(express.static(path.join(__dirname, "public")));
 app.use("/images", express.static(path.join(__dirname, "images")));
@@ -66,6 +74,17 @@ const GROVE_TECH_IDS = new Set([
   "BedrockFoundations",
 ]);
 const LANDMARK_TYPES = new Set(LANDMARK_POOL || []);
+
+function createReconnectToken() {
+  return randomBytes(24).toString("hex");
+}
+
+function normalizeReconnectToken(value) {
+  if (typeof value !== "string") return "";
+  const token = value.trim();
+  if (!token || token.length > 128) return "";
+  return token;
+}
 
 function randInt(min, max) {
   return Math.floor(Math.random() * (max - min + 1)) + min;
@@ -1165,6 +1184,9 @@ function createMatch(playerCount = 2) {
     index,
     team: TEAM_OPTIONS[index] || index + 1,
     eliminated: false,
+    disconnected: false,
+    reconnectDeadline: null,
+    reconnectToken: createReconnectToken(),
     color: PLAYER_COLORS[index] || PLAYER_COLORS[0],
     resources: { food: 200, wood: 200, gold: 0, stone: 0 },
     techs: {},
@@ -1267,6 +1289,7 @@ function createMatch(playerCount = 2) {
     fogReveal: false,
     fastBuild: false,
     alertCooldowns: new Map(),
+    disconnectGraceTimers: new Map(),
     initialTeamIds: [...new Set(players.map((p) => p.team))],
   };
 }
@@ -1283,6 +1306,11 @@ function assignPlayer(match, socket, colorHex = null, teamId = null) {
   const slot = match.players.find((player) => player.id === null);
   if (!slot) return null;
   slot.id = socket.id;
+  slot.disconnected = false;
+  slot.reconnectDeadline = null;
+  if (!slot.reconnectToken) {
+    slot.reconnectToken = createReconnectToken();
+  }
   if (colorHex) {
     slot.color = colorHex;
   }
@@ -1700,6 +1728,8 @@ function getEntitySnapshot(match) {
       index: player.index,
       team: player.team,
       eliminated: !!player.eliminated,
+      disconnected: !!player.disconnected,
+      reconnectDeadline: Number(player.reconnectDeadline) || null,
       resources: player.resources,
       techs: player.techs,
       ageTier: player.ageTier,
@@ -5263,11 +5293,100 @@ function processRepairing(match, dt) {
   }
 }
 
+function clearDisconnectGraceTimer(match, playerIndex) {
+  if (!match?.disconnectGraceTimers) return;
+  const handle = match.disconnectGraceTimers.get(playerIndex);
+  if (!handle) return;
+  clearTimeout(handle);
+  match.disconnectGraceTimers.delete(playerIndex);
+}
+
+function resolveMatchAndPlayerForSocket(socket) {
+  if (!socket) return null;
+  if (socket.matchId && matches.has(socket.matchId)) {
+    const byIdMatch = matches.get(socket.matchId);
+    const byIdPlayer = byIdMatch.players.find((p) => p.id === socket.id);
+    if (byIdPlayer) {
+      return { match: byIdMatch, player: byIdPlayer };
+    }
+  }
+  for (const match of matches.values()) {
+    const player = match.players.find((p) => p.id === socket.id);
+    if (player) {
+      socket.matchId = match.id;
+      return { match, player };
+    }
+  }
+  return null;
+}
+
+function tryResumeDisconnectedPlayer(socket) {
+  if (!socket) return false;
+  const reconnectToken = normalizeReconnectToken(
+    socket.handshake?.auth?.reconnectToken
+  );
+  for (const match of matches.values()) {
+    for (const player of match.players) {
+      if (!player || player.eliminated || !player.id) continue;
+      const hasActiveSocket = io.sockets.sockets.has(player.id);
+      const canResumeNow = player.disconnected || !hasActiveSocket;
+      if (!canResumeNow) continue;
+      const matchesBySocketId = player.id === socket.id;
+      const matchesByToken =
+        reconnectToken && player.reconnectToken === reconnectToken;
+      if (!matchesBySocketId && !matchesByToken) continue;
+      clearDisconnectGraceTimer(match, player.index);
+      if (player.id && player.id !== socket.id) {
+        match.sockets.delete(player.id);
+      }
+      player.id = socket.id;
+      player.disconnected = false;
+      player.reconnectDeadline = null;
+      match.sockets.set(socket.id, socket);
+      emitMatchStart(match, socket, player);
+      io.to(match.id).emit("stateUpdate", getEntitySnapshot(match));
+      return true;
+    }
+  }
+  return false;
+}
+
+function scheduleDisconnectGraceElimination(match, playerIndex) {
+  const player = match?.players?.[playerIndex];
+  if (!player || player.eliminated) return;
+  clearDisconnectGraceTimer(match, playerIndex);
+  player.disconnected = true;
+  player.reconnectDeadline = Date.now() + PLAYER_RECONNECT_GRACE_MS;
+  const timeoutHandle = setTimeout(() => {
+    if (!matches.has(match.id)) return;
+    match.disconnectGraceTimers.delete(playerIndex);
+    const currentPlayer = match.players[playerIndex];
+    if (!currentPlayer || currentPlayer.eliminated || !currentPlayer.disconnected) {
+      return;
+    }
+    eliminatePlayer(match, playerIndex, "player_disconnected");
+    const outcome = getMatchOutcome(match);
+    if (outcome) {
+      io.to(match.id).emit("matchEnded", outcome);
+      cleanupMatch(match.id);
+      return;
+    }
+    io.to(match.id).emit("stateUpdate", getEntitySnapshot(match));
+  }, PLAYER_RECONNECT_GRACE_MS);
+  match.disconnectGraceTimers.set(playerIndex, timeoutHandle);
+}
+
 function eliminatePlayer(match, playerIndex, reason = "eliminated") {
   const player = match.players[playerIndex];
   if (!player || player.eliminated) return false;
+  clearDisconnectGraceTimer(match, playerIndex);
   player.eliminated = true;
   player.eliminationReason = reason;
+  player.disconnected = false;
+  player.reconnectDeadline = null;
+  if (player.id) {
+    match.sockets.delete(player.id);
+  }
 
   for (const unit of match.units) {
     if (unit.ownerId !== playerIndex) continue;
@@ -5420,6 +5539,12 @@ function stopMatch(match) {
 function cleanupMatch(matchId) {
   const match = matches.get(matchId);
   if (!match) return;
+  if (match.disconnectGraceTimers) {
+    for (const handle of match.disconnectGraceTimers.values()) {
+      clearTimeout(handle);
+    }
+    match.disconnectGraceTimers.clear();
+  }
   stopMatch(match);
   matches.delete(matchId);
 }
@@ -5431,6 +5556,7 @@ function emitMatchStart(match, socket, player) {
   socket.emit("matchStart", {
     matchId: match.id,
     playerIndex: player.index,
+    reconnectToken: player.reconnectToken || null,
     map: match.map,
     resources: match.resources,
     singleplayer: match.singleplayer,
@@ -5439,6 +5565,8 @@ function emitMatchStart(match, socket, player) {
       index: p.index,
       team: p.team,
       eliminated: !!p.eliminated,
+      disconnected: !!p.disconnected,
+      reconnectDeadline: Number(p.reconnectDeadline) || null,
       resources: p.resources,
       techs: p.techs,
       ageTier: p.ageTier,
@@ -5490,6 +5618,7 @@ function startMultiplayerMatch(
 }
 
 io.on("connection", (socket) => {
+  tryResumeDisconnectedPlayer(socket);
   socket.emit("lobbyList", getLobbyList());
 
   socket.on("requestLobbies", () => {
@@ -5733,44 +5862,15 @@ io.on("connection", (socket) => {
 
       pruneEnemyForSingleplayer(match, playerA.index);
 
-    socket.matchId = match.id;
-    socket.isQueued = false;
-    socket.join(match.id);
-
-      socket.emit("matchStart", {
-        matchId: match.id,
-        playerIndex: playerA.index,
-        map: match.map,
-        resources: match.resources,
-        singleplayer: match.singleplayer,
-        allowCheats: match.allowCheats,
-    players: match.players.map((player) => ({
-      index: player.index,
-      team: player.team,
-      eliminated: !!player.eliminated,
-      resources: player.resources,
-      techs: player.techs,
-      ageTier: player.ageTier,
-      age: player.age,
-      landmarkChoices: player.landmarkChoices || [],
-      landmarkBuiltAges: player.landmarkBuiltAges || {},
-      color: player.color,
-      populationUsed: getPopulationUsed(match, player.index),
-      populationCap: getPopulationCap(match, player.index),
-        })),
-        units: match.units,
-        buildings: match.buildings,
-        relics: match.relics || [],
-      });
+    emitMatchStart(match, socket, playerA);
 
     startMatch(match);
   });
 
   socket.on("command", (payload, ack) => {
-    const match = matches.get(socket.matchId);
-    if (!match) return;
-    const player = match.players.find((p) => p.id === socket.id);
-    if (!player) return;
+    const resolved = resolveMatchAndPlayerForSocket(socket);
+    if (!resolved) return;
+    const { match, player } = resolved;
     if (!isPlainObject(payload) || typeof payload.type !== "string") {
       if (typeof ack === "function") {
         ack({ ok: false, reason: "invalid_payload" });
@@ -6899,26 +6999,20 @@ io.on("connection", (socket) => {
   });
 
   socket.on("disconnect", () => {
-    const matchId = socket.matchId;
-    if (matchId && matches.has(matchId)) {
-      const match = matches.get(matchId);
-      const player = match.players.find((p) => p.id === socket.id);
+    const resolved = resolveMatchAndPlayerForSocket(socket);
+    if (resolved) {
+      const { match, player } = resolved;
+      match.sockets.delete(socket.id);
       if (player && !player.eliminated) {
-        eliminatePlayer(match, player.index, "player_disconnected");
+        scheduleDisconnectGraceElimination(match, player.index);
       }
-      const outcome = getMatchOutcome(match);
-      if (outcome) {
-        io.to(matchId).emit("matchEnded", outcome);
-        cleanupMatch(matchId);
-      } else {
-        io.to(matchId).emit("stateUpdate", getEntitySnapshot(match));
-      }
-    } else {
-      if (socket.lobbyId) {
-        leaveLobby(socket, "disconnect");
-      }
-      removeFromQueue(socket);
+      io.to(match.id).emit("stateUpdate", getEntitySnapshot(match));
+      return;
     }
+    if (socket.lobbyId) {
+      leaveLobby(socket, "disconnect");
+    }
+    removeFromQueue(socket);
   });
 });
 
