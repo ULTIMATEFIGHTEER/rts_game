@@ -65,6 +65,7 @@ const ctx = canvas.getContext("2d");
 const minimap = document.getElementById("minimap");
 const miniCtx = minimap.getContext("2d");
 const overlay = document.getElementById("overlay");
+const overlayPanel = overlay ? overlay.querySelector(".panel") : null;
 const playButton = document.getElementById("play");
 const singleplayerButton = document.getElementById("singleplayer");
 const lobbyNameInput = document.getElementById("lobby-name-input");
@@ -80,6 +81,9 @@ const lobbyRoomPlayers = document.getElementById("lobby-room-players");
 const lobbyCheatsToggle = document.getElementById("lobby-cheats");
 const lobbyColors = document.getElementById("lobby-colors");
 const lobbyTeams = document.getElementById("lobby-teams");
+const lobbyChatLog = document.getElementById("lobby-chat-log");
+const lobbyChatForm = document.getElementById("lobby-chat-form");
+const lobbyChatInput = document.getElementById("lobby-chat-input");
 const lobbyModal = document.getElementById("lobby-modal");
 const confirmLobbyButton = document.getElementById("confirm-lobby");
 const cancelLobbyButton = document.getElementById("cancel-lobby");
@@ -108,6 +112,10 @@ const attackNotify = document.getElementById("attack-notify");
 const researchNotify = document.getElementById("research-notify");
 const ageNotify = document.getElementById("age-notify");
 const playerList = document.getElementById("player-list");
+const gameChat = document.getElementById("game-chat");
+const gameChatLog = document.getElementById("game-chat-log");
+const gameChatEntry = document.getElementById("game-chat-entry");
+const gameChatInput = document.getElementById("game-chat-input");
 const bottomBar = document.getElementById("bottom-bar");
 let errorBanner = document.getElementById("error-banner");
 
@@ -116,6 +124,9 @@ if (buildButtons) {
 }
 if (bottomBar) {
   bottomBar.classList.add("hidden");
+}
+if (lobbyChatInput) {
+  lobbyChatInput.disabled = true;
 }
 
 // Market trading will be added in a future update.
@@ -148,6 +159,12 @@ let isSearching = false;
 let currentLobby = null;
 let isLobbyHost = false;
 let pendingCheat = null;
+let cheatPanelOpen = false;
+let lobbyChatMessages = [];
+let gameChatMessages = [];
+let isGameChatEntryOpen = false;
+let lastGameChatMessageAt = 0;
+let gameChatHideTimer = null;
 let lastMouseScreen = { x: 0, y: 0 };
 const projectiles = [];
 const projectileImpacts = [];
@@ -264,6 +281,10 @@ const controlGroupLastSelect = new Map();
 const UNIT_PRODUCTION_HOTKEYS = ["q", "e", "r", "t", "y"];
 const REPAIR_COMMAND_HOTKEY = "z";
 const CANCEL_QUEUE_HOTKEY = "b";
+const MAX_CHAT_MESSAGE_LENGTH = 220;
+const MAX_LOBBY_CHAT_MESSAGES = 120;
+const MAX_GAME_CHAT_MESSAGES = 80;
+const GAME_CHAT_AUTO_HIDE_MS = 7000;
 
 function isTypingFieldActive() {
   const el = document.activeElement;
@@ -502,6 +523,35 @@ if (lobbyTeams) {
   });
 }
 
+if (lobbyChatForm) {
+  lobbyChatForm.addEventListener("submit", (event) => {
+    event.preventDefault();
+    if (!currentLobby || !lobbyChatInput) return;
+    const text = (lobbyChatInput.value || "").trim();
+    if (!text) return;
+    socket.emit(
+      "lobbyChat",
+      {
+        id: currentLobby.id,
+        text: text.slice(0, MAX_CHAT_MESSAGE_LENGTH),
+      },
+      (response) => {
+        if (response && response.ok === false) {
+          const reason = response.reason || "chat_failed";
+          const friendly = {
+            not_in_lobby: "You are not in a lobby.",
+            empty_message: "Message cannot be empty.",
+          }[reason] || "Unable to send lobby chat message.";
+          showBanner(friendly, "error", 1800);
+          return;
+        }
+      }
+    );
+    lobbyChatInput.value = "";
+    lobbyChatInput.focus();
+  });
+}
+
 if (lobbyModal) {
   lobbyModal.addEventListener("click", (event) => {
     if (event.target === lobbyModal) {
@@ -543,6 +593,28 @@ if (resignModal) {
 if (matchReturnLobbyButton) {
   matchReturnLobbyButton.addEventListener("click", () => {
     returnToLobbyAfterMatch();
+  });
+}
+
+if (gameChatInput) {
+  gameChatInput.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      submitGameChatMessage(event.shiftKey ? "all" : "team");
+      return;
+    }
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeGameChatEntry(true);
+      return;
+    }
+    event.stopPropagation();
+  });
+  gameChatInput.addEventListener("focus", () => {
+    updateGameChatVisibility();
+  });
+  gameChatInput.addEventListener("blur", () => {
+    updateGameChatVisibility();
   });
 }
 
@@ -597,6 +669,9 @@ function renderLobbyList(lobbies = []) {
 function setLobbyView(active) {
   if (lobbyBrowser) lobbyBrowser.classList.toggle("hidden", !!active);
   if (lobbyRoom) lobbyRoom.classList.toggle("hidden", !active);
+  if (overlayPanel) {
+    overlayPanel.classList.toggle("lobby-room-active", !!active);
+  }
 }
 
 function isLobbyReadyToStart(lobby) {
@@ -635,6 +710,315 @@ function updateStartLobbyButtonState(lobby = currentLobby) {
   startLobbyButton.title = ready
     ? ""
     : "Need at least two players on different teams.";
+}
+
+function isInActiveMatch() {
+  return playerIndex !== null && overlay && overlay.classList.contains("hidden");
+}
+
+function normalizeLobbyChatMessage(entry) {
+  if (!entry || typeof entry !== "object") return null;
+  const text =
+    typeof entry.text === "string"
+      ? entry.text.trim().slice(0, MAX_CHAT_MESSAGE_LENGTH)
+      : "";
+  if (!text) return null;
+  const senderLabel =
+    typeof entry.senderLabel === "string" && entry.senderLabel.trim()
+      ? entry.senderLabel.trim().slice(0, 48)
+      : "Player";
+  const team = Number(entry.team);
+  const senderId =
+    typeof entry.senderId === "string" && entry.senderId.trim()
+      ? entry.senderId
+      : null;
+  return {
+    text,
+    senderId,
+    senderLabel,
+    team: Number.isFinite(team) ? team : null,
+    at: Number(entry.at) || Date.now(),
+  };
+}
+
+function getLobbySenderColor(senderId) {
+  if (!senderId || !currentLobby) return null;
+  const colorId = currentLobby.colorAssignments?.[senderId];
+  if (!colorId) return null;
+  const colorEntry = (PLAYER_COLOR_OPTIONS || []).find((c) => c.id === colorId);
+  return colorEntry?.hex || null;
+}
+
+function renderLobbyChatMessages() {
+  if (!lobbyChatLog) return;
+  lobbyChatLog.innerHTML = "";
+  if (!lobbyChatMessages.length) {
+    const empty = document.createElement("div");
+    empty.className = "lobby-chat-empty";
+    empty.textContent = "No messages yet.";
+    lobbyChatLog.appendChild(empty);
+    return;
+  }
+  const fragment = document.createDocumentFragment();
+  for (const message of lobbyChatMessages) {
+    const line = document.createElement("div");
+    line.className = "lobby-chat-line";
+    const scope = document.createElement("span");
+    scope.className = "lobby-chat-scope";
+    const teamLabel = Number.isFinite(message.team) ? `T${message.team}` : "T?";
+    scope.textContent = `[${teamLabel}]`;
+    const prefix = document.createElement("span");
+    prefix.className = "lobby-chat-prefix";
+    prefix.textContent = `${message.senderLabel}:`;
+    const senderColor = getLobbySenderColor(message.senderId);
+    if (senderColor) {
+      prefix.style.color = senderColor;
+    }
+    const body = document.createElement("span");
+    body.textContent = message.text;
+    line.appendChild(scope);
+    line.appendChild(prefix);
+    line.appendChild(body);
+    fragment.appendChild(line);
+  }
+  lobbyChatLog.appendChild(fragment);
+  lobbyChatLog.scrollTop = lobbyChatLog.scrollHeight;
+}
+
+function setLobbyChatMessages(entries = []) {
+  if (!Array.isArray(entries)) {
+    lobbyChatMessages = [];
+    renderLobbyChatMessages();
+    return;
+  }
+  lobbyChatMessages = entries
+    .map((entry) => normalizeLobbyChatMessage(entry))
+    .filter(Boolean)
+    .slice(-MAX_LOBBY_CHAT_MESSAGES);
+  renderLobbyChatMessages();
+}
+
+function appendLobbyChatMessage(entry) {
+  const normalized = normalizeLobbyChatMessage(entry);
+  if (!normalized) return;
+  lobbyChatMessages.push(normalized);
+  if (lobbyChatMessages.length > MAX_LOBBY_CHAT_MESSAGES) {
+    lobbyChatMessages = lobbyChatMessages.slice(
+      lobbyChatMessages.length - MAX_LOBBY_CHAT_MESSAGES
+    );
+  }
+  renderLobbyChatMessages();
+}
+
+function normalizeGameChatMessage(entry) {
+  if (!entry || typeof entry !== "object") return null;
+  const text =
+    typeof entry.text === "string"
+      ? entry.text.trim().slice(0, MAX_CHAT_MESSAGE_LENGTH)
+      : "";
+  if (!text) return null;
+  const senderIndex = Number(entry.senderIndex);
+  const senderLabel =
+    typeof entry.senderLabel === "string" && entry.senderLabel.trim()
+      ? entry.senderLabel.trim().slice(0, 48)
+      : Number.isFinite(senderIndex)
+      ? `Player ${senderIndex + 1}`
+      : "Player";
+  const senderTeam = Number(entry.senderTeam);
+  return {
+    text,
+    scope: entry.scope === "all" ? "all" : "team",
+    senderLabel,
+    senderIndex: Number.isFinite(senderIndex) ? senderIndex : null,
+    senderTeam: Number.isFinite(senderTeam) ? senderTeam : null,
+    at: Number(entry.at) || Date.now(),
+  };
+}
+
+function clearGameChatHideTimer() {
+  if (gameChatHideTimer !== null) {
+    clearTimeout(gameChatHideTimer);
+    gameChatHideTimer = null;
+  }
+}
+
+function getGameChatRemainingVisibleMs() {
+  if (!gameChatMessages.length || lastGameChatMessageAt <= 0) {
+    return 0;
+  }
+  return Math.max(
+    0,
+    GAME_CHAT_AUTO_HIDE_MS - (performance.now() - lastGameChatMessageAt)
+  );
+}
+
+function scheduleGameChatAutoHide() {
+  clearGameChatHideTimer();
+  if (!gameChat || !isInActiveMatch()) return;
+  const isSelectingChatBox =
+    !!gameChatInput && document.activeElement === gameChatInput;
+  if (isSelectingChatBox) return;
+  const remaining = getGameChatRemainingVisibleMs();
+  if (remaining <= 0) return;
+  gameChatHideTimer = setTimeout(() => {
+    gameChatHideTimer = null;
+    updateGameChatVisibility();
+  }, remaining + 20);
+}
+
+function updateGameChatVisibility() {
+  if (!gameChat) return;
+  const isSelectingChatBox =
+    !!gameChatInput && document.activeElement === gameChatInput;
+  const hasRecentMessage = getGameChatRemainingVisibleMs() > 0;
+  const visible = isInActiveMatch() && (isSelectingChatBox || hasRecentMessage);
+  gameChat.classList.toggle("hidden", !visible);
+  if (visible && !isSelectingChatBox) {
+    scheduleGameChatAutoHide();
+  } else {
+    clearGameChatHideTimer();
+  }
+}
+
+function renderGameChatMessages() {
+  if (!gameChatLog) {
+    updateGameChatVisibility();
+    return;
+  }
+  gameChatLog.innerHTML = "";
+  if (!gameChatMessages.length) {
+    const hint = document.createElement("div");
+    hint.className = "game-chat-hint";
+    hint.textContent = "Press Enter to chat. Shift+Enter sends to all.";
+    gameChatLog.appendChild(hint);
+    updateGameChatVisibility();
+    return;
+  }
+  const visibleMessages = gameChatMessages.slice(-12);
+  const fragment = document.createDocumentFragment();
+  for (const message of visibleMessages) {
+    const line = document.createElement("div");
+    line.className = "game-chat-line";
+    if (message.senderIndex === playerIndex) {
+      line.classList.add("self");
+    }
+    const scope = document.createElement("span");
+    scope.className = "game-chat-scope";
+    scope.textContent =
+      message.scope === "all"
+        ? "[All]"
+        : `[T${Number.isFinite(message.senderTeam) ? message.senderTeam : "?"}]`;
+    const author = document.createElement("span");
+    author.className = "game-chat-author";
+    author.textContent = `${message.senderLabel}:`;
+    if (message.senderIndex !== null && message.senderIndex !== undefined) {
+      author.style.color = getPlayerColor(message.senderIndex);
+    }
+    const text = document.createElement("span");
+    text.textContent = message.text;
+    line.appendChild(scope);
+    line.appendChild(author);
+    line.appendChild(text);
+    fragment.appendChild(line);
+  }
+  gameChatLog.appendChild(fragment);
+  gameChatLog.scrollTop = gameChatLog.scrollHeight;
+  updateGameChatVisibility();
+}
+
+function appendGameChatMessage(entry) {
+  const normalized = normalizeGameChatMessage(entry);
+  if (!normalized) return;
+  lastGameChatMessageAt = performance.now();
+  gameChatMessages.push(normalized);
+  if (gameChatMessages.length > MAX_GAME_CHAT_MESSAGES) {
+    gameChatMessages = gameChatMessages.slice(
+      gameChatMessages.length - MAX_GAME_CHAT_MESSAGES
+    );
+  }
+  renderGameChatMessages();
+}
+
+function closeGameChatEntry(clearInput = true) {
+  isGameChatEntryOpen = false;
+  if (gameChatEntry) {
+    gameChatEntry.classList.add("hidden");
+  }
+  if (gameChatInput) {
+    if (clearInput) {
+      gameChatInput.value = "";
+    }
+    if (document.activeElement === gameChatInput) {
+      gameChatInput.blur();
+    }
+  }
+  updateGameChatVisibility();
+}
+
+function openGameChatEntry() {
+  if (!isInActiveMatch() || !gameChatInput || !gameChatEntry) return false;
+  keys.clear();
+  isGameChatEntryOpen = true;
+  gameChatEntry.classList.remove("hidden");
+  clearGameChatHideTimer();
+  if (gameChat) {
+    gameChat.classList.remove("hidden");
+  }
+  gameChatInput.value = "";
+  const focusInput = () => {
+    try {
+      gameChatInput.focus({ preventScroll: true });
+    } catch {
+      gameChatInput.focus();
+    }
+    gameChatInput.select();
+  };
+  requestAnimationFrame(() => {
+    focusInput();
+    updateGameChatVisibility();
+    if (document.activeElement !== gameChatInput) {
+      setTimeout(() => {
+        focusInput();
+        updateGameChatVisibility();
+      }, 0);
+    }
+  });
+  return true;
+}
+
+function resetGameChatState() {
+  clearGameChatHideTimer();
+  gameChatMessages = [];
+  lastGameChatMessageAt = 0;
+  closeGameChatEntry(true);
+  renderGameChatMessages();
+}
+
+function submitGameChatMessage(scope = "team") {
+  if (!gameChatInput) return;
+  const text = (gameChatInput.value || "").trim();
+  if (!text) {
+    closeGameChatEntry(true);
+    return;
+  }
+  const resolvedScope = scope === "all" ? "all" : "team";
+  sendCommand(
+    {
+      type: "chat",
+      text: text.slice(0, MAX_CHAT_MESSAGE_LENGTH),
+      scope: resolvedScope,
+    },
+    {
+      onError: (response) => {
+        const reason = response?.reason || "chat_failed";
+        const friendly = {
+          empty_message: "Message cannot be empty.",
+        }[reason] || "Unable to send chat message.";
+        showBanner(friendly, "error", 1800);
+      },
+    }
+  );
+  closeGameChatEntry(true);
 }
 
 function setLobbyModal(open) {
@@ -690,6 +1074,9 @@ function returnToLobbyAfterMatch() {
   allowCheats = false;
   if (playButton) playButton.textContent = "Play";
   currentLobby = null;
+  setLobbyChatMessages([]);
+  if (lobbyChatInput) lobbyChatInput.disabled = true;
+  resetGameChatState();
   if (leaveLobbyButton) leaveLobbyButton.disabled = true;
   if (createLobbyButton) createLobbyButton.disabled = false;
   if (lobbyNameInput) lobbyNameInput.disabled = false;
@@ -827,6 +1214,10 @@ socket.on("lobbyJoined", (lobby) => {
   statusEl.textContent = `Lobby: ${lobby.name}`;
   setLobbyView(true);
   setLobbyModal(false);
+  setLobbyChatMessages(lobby.chatLog || []);
+  if (lobbyChatInput) {
+    lobbyChatInput.disabled = false;
+  }
   renderLobbyRoom(lobby);
   renderLobbyList([]);
 });
@@ -843,6 +1234,10 @@ socket.on("lobbyLeft", () => {
   statusEl.textContent = "Idle";
   setLobbyView(false);
   setLobbyModal(false);
+  setLobbyChatMessages([]);
+  if (lobbyChatInput) {
+    lobbyChatInput.disabled = true;
+  }
   socket.emit("requestLobbies");
 });
 
@@ -852,8 +1247,14 @@ socket.on("lobbyUpdate", (lobby) => {
   isLobbyHost = lobby.isHost || false;
   allowCheats = !!lobby.allowCheats;
   selectedColorId = lobby.colorAssignments?.[socket.id] || null;
+  setLobbyChatMessages(lobby.chatLog || []);
   renderLobbyRoom(lobby);
   updateStartLobbyButtonState(lobby);
+});
+
+socket.on("lobbyChat", (entry) => {
+  if (!currentLobby) return;
+  appendLobbyChatMessage(entry);
 });
 
 socket.on("matchStart", (payload) => {
@@ -872,6 +1273,11 @@ socket.on("matchStart", (payload) => {
   updateStartLobbyButtonState(null);
   setLobbyView(false);
   setLobbyModal(false);
+  setLobbyChatMessages([]);
+  if (lobbyChatInput) {
+    lobbyChatInput.disabled = true;
+  }
+  resetGameChatState();
   setResignModal(false);
   if (bottomBar) bottomBar.classList.add("hidden");
   map = payload.map;
@@ -1090,6 +1496,7 @@ socket.on("stateUpdate", (payload) => {
 
 socket.on("matchEnded", (payload = {}) => {
   saveReconnectToken("");
+  closeGameChatEntry(false);
   const winningTeam = Number(payload?.winnerTeam);
   const hasWinningTeam =
     payload?.reason === "team_victory" && Number.isFinite(winningTeam);
@@ -1251,6 +1658,11 @@ socket.on("playerResigned", (payload) => {
     }, 3500);
   }
   showBanner(`${label} resigned.`, "info", 2500);
+});
+
+socket.on("chatMessage", (entry) => {
+  if (!isInActiveMatch()) return;
+  appendGameChatMessage(entry);
 });
 
 socket.on("unitComplete", () => {
@@ -3030,10 +3442,33 @@ function renderCheatBar() {
   cheatBar.innerHTML = "";
   if (!isSingleplayer && !allowCheats) {
     cheatBar.classList.remove("visible");
+    cheatPanelOpen = false;
     return;
   }
   const singleplayerSpawnOnly = isSingleplayer;
   cheatBar.classList.add("visible");
+  const toggleBtn = document.createElement("button");
+  toggleBtn.className = "cheat-toggle";
+  toggleBtn.type = "button";
+  toggleBtn.textContent = cheatPanelOpen ? "Hide Cheats" : "Show Cheats";
+  toggleBtn.setAttribute("aria-expanded", cheatPanelOpen ? "true" : "false");
+  cheatBar.appendChild(toggleBtn);
+
+  const panel = document.createElement("div");
+  panel.className = `cheat-panel${cheatPanelOpen ? "" : " hidden"}`;
+  cheatBar.appendChild(panel);
+
+  const setPanelOpen = (open) => {
+    cheatPanelOpen = !!open;
+    panel.classList.toggle("hidden", !cheatPanelOpen);
+    toggleBtn.textContent = cheatPanelOpen ? "Hide Cheats" : "Show Cheats";
+    toggleBtn.setAttribute("aria-expanded", cheatPanelOpen ? "true" : "false");
+  };
+
+  toggleBtn.addEventListener("click", () => {
+    setPanelOpen(!cheatPanelOpen);
+  });
+
   const buttons = [
     { label: "Grant 10,000 food", action: "grant_food" },
     { label: "Grant 10,000 wood", action: "grant_wood" },
@@ -3080,7 +3515,7 @@ function renderCheatBar() {
         showBanner("Click a location on the map.", "info", 2000);
       }
     });
-    cheatBar.appendChild(btn);
+    panel.appendChild(btn);
   });
 }
 
@@ -5446,76 +5881,93 @@ canvas.addEventListener("mouseup", (event) => {
 });
 
 window.addEventListener("keydown", (event) => {
-  keys.add(event.key.toLowerCase());
-  if (!isTypingFieldActive()) {
-    const key = event.key.toLowerCase();
-    if (!event.ctrlKey && !event.metaKey && !event.altKey) {
-      const hotkeyIndex = UNIT_PRODUCTION_HOTKEYS.indexOf(key);
-      if (hotkeyIndex !== -1) {
-        event.preventDefault();
-        if (queueUnitProductionByIndex(hotkeyIndex)) {
-          return;
-        }
-      }
-      if (key === CANCEL_QUEUE_HOTKEY) {
-        event.preventDefault();
-        if (cancelLatestQueueItemForSelection()) {
-          return;
-        }
-      }
-      if (key === REPAIR_COMMAND_HOTKEY) {
-        event.preventDefault();
-        if (armRepairMode()) {
-          return;
-        }
+  if (isTypingFieldActive()) {
+    return;
+  }
+
+  const key = event.key.toLowerCase();
+  keys.add(key);
+
+  if (
+    event.key === "Enter" &&
+    !event.ctrlKey &&
+    !event.metaKey &&
+    !event.altKey &&
+    isInActiveMatch()
+  ) {
+    event.preventDefault();
+    openGameChatEntry();
+    return;
+  }
+
+  if (!event.ctrlKey && !event.metaKey && !event.altKey) {
+    const hotkeyIndex = UNIT_PRODUCTION_HOTKEYS.indexOf(key);
+    if (hotkeyIndex !== -1) {
+      event.preventDefault();
+      if (queueUnitProductionByIndex(hotkeyIndex)) {
+        return;
       }
     }
-    const groupNumber = Number.parseInt(event.key, 10);
-    if (Number.isInteger(groupNumber) && groupNumber >= 1 && groupNumber <= 9) {
-      if (event.ctrlKey || event.metaKey) {
-        event.preventDefault();
-        const ownedUnits = selectedUnits.filter(
-          (unit) => unit.ownerId === playerIndex
-        );
-        if (ownedUnits.length) {
-          controlGroups.set(
-            groupNumber,
-            ownedUnits.map((unit) => unit.id)
-          );
-          showBanner(`Control group ${groupNumber} set.`, "ok", 1200);
-        }
-      } else {
-        const ids = controlGroups.get(groupNumber) || [];
-        if (ids.length) {
-          const unitById = new Map(units.map((u) => [u.id, u]));
-          const selected = ids
-            .map((id) => unitById.get(id))
-            .filter((u) => u && u.ownerId === playerIndex);
-          selectedUnits = selected;
-          selectedBuilding = null;
-          selectedBuildings = [];
-          selectedResource = null;
-          selectedRelic = null;
-          updateSelectionUI();
-          const now = performance.now();
-          const last = controlGroupLastSelect.get(groupNumber) || 0;
-          if (now - last < 450 && selected.length) {
-            const avgX =
-              selected.reduce((sum, unit) => sum + unit.x, 0) / selected.length;
-            const avgY =
-              selected.reduce((sum, unit) => sum + unit.y, 0) / selected.length;
-            camera.x = avgX * map.tileSize - canvas.width / 2;
-            camera.y = avgY * map.tileSize - canvas.height / 2;
-            clampCamera();
-          }
-          controlGroupLastSelect.set(groupNumber, now);
-          showBanner(`Control group ${groupNumber} selected.`, "info", 1000);
-        }
+    if (key === CANCEL_QUEUE_HOTKEY) {
+      event.preventDefault();
+      if (cancelLatestQueueItemForSelection()) {
+        return;
       }
-      return;
+    }
+    if (key === REPAIR_COMMAND_HOTKEY) {
+      event.preventDefault();
+      if (armRepairMode()) {
+        return;
+      }
     }
   }
-  if (event.key.toLowerCase() === "c") {
+
+  const groupNumber = Number.parseInt(event.key, 10);
+  if (Number.isInteger(groupNumber) && groupNumber >= 1 && groupNumber <= 9) {
+    if (event.ctrlKey || event.metaKey) {
+      event.preventDefault();
+      const ownedUnits = selectedUnits.filter(
+        (unit) => unit.ownerId === playerIndex
+      );
+      if (ownedUnits.length) {
+        controlGroups.set(
+          groupNumber,
+          ownedUnits.map((unit) => unit.id)
+        );
+        showBanner(`Control group ${groupNumber} set.`, "ok", 1200);
+      }
+    } else {
+      const ids = controlGroups.get(groupNumber) || [];
+      if (ids.length) {
+        const unitById = new Map(units.map((u) => [u.id, u]));
+        const selected = ids
+          .map((id) => unitById.get(id))
+          .filter((u) => u && u.ownerId === playerIndex);
+        selectedUnits = selected;
+        selectedBuilding = null;
+        selectedBuildings = [];
+        selectedResource = null;
+        selectedRelic = null;
+        updateSelectionUI();
+        const now = performance.now();
+        const last = controlGroupLastSelect.get(groupNumber) || 0;
+        if (now - last < 450 && selected.length) {
+          const avgX =
+            selected.reduce((sum, unit) => sum + unit.x, 0) / selected.length;
+          const avgY =
+            selected.reduce((sum, unit) => sum + unit.y, 0) / selected.length;
+          camera.x = avgX * map.tileSize - canvas.width / 2;
+          camera.y = avgY * map.tileSize - canvas.height / 2;
+          clampCamera();
+        }
+        controlGroupLastSelect.set(groupNumber, now);
+        showBanner(`Control group ${groupNumber} selected.`, "info", 1000);
+      }
+    }
+    return;
+  }
+
+  if (key === "c") {
     if (selectedBuilding && selectedBuilding.isUnderConstruction) {
       sendCommand(
         { type: "cancelBuild", buildingId: selectedBuilding.id },
@@ -5524,7 +5976,7 @@ window.addEventListener("keydown", (event) => {
       return;
     }
   }
-  if (event.key.toLowerCase() === "f") {
+  if (key === "f") {
     if (selectedUnits.length > 0) {
       attackMoveArmed = true;
     }

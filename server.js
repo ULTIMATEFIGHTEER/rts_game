@@ -68,6 +68,8 @@ const HOUSE_POPULATION_BONUS = 10;
 const MAX_POPULATION_CAP = 200;
 const LANDMARK_COUNT_PER_PLAYER = 4;
 const MAX_COMMAND_ENTITY_IDS = 256;
+const MAX_CHAT_MESSAGE_LENGTH = 220;
+const MAX_LOBBY_CHAT_MESSAGES = 120;
 const GROVE_TECH_IDS = new Set([
   "GreaterRations",
   "SecondWind",
@@ -84,6 +86,13 @@ function normalizeReconnectToken(value) {
   const token = value.trim();
   if (!token || token.length > 128) return "";
   return token;
+}
+
+function normalizeChatText(value, maxLength = MAX_CHAT_MESSAGE_LENGTH) {
+  if (typeof value !== "string") return "";
+  const cleaned = value.replace(/\s+/g, " ").trim();
+  if (!cleaned) return "";
+  return cleaned.slice(0, maxLength);
 }
 
 function randInt(min, max) {
@@ -1427,6 +1436,36 @@ function getLobbyPlayerList(lobby) {
   }));
 }
 
+function getLobbyChatHistory(lobby) {
+  if (!Array.isArray(lobby?.chatLog)) return [];
+  return lobby.chatLog
+    .filter((entry) => entry && typeof entry.text === "string")
+    .slice(-MAX_LOBBY_CHAT_MESSAGES)
+    .map((entry) => ({
+      text: normalizeChatText(entry.text),
+      senderId: entry.senderId || null,
+      senderLabel:
+        typeof entry.senderLabel === "string" && entry.senderLabel.trim()
+          ? entry.senderLabel.trim().slice(0, 48)
+          : "Player",
+      team: Number.isFinite(Number(entry.team)) ? Number(entry.team) : null,
+      at: Number(entry.at) || Date.now(),
+    }))
+    .filter((entry) => !!entry.text);
+}
+
+function getLobbySenderLabel(lobby, socketId) {
+  const index = Array.isArray(lobby?.players)
+    ? lobby.players.indexOf(socketId)
+    : -1;
+  if (index < 0) return "Player";
+  const baseLabel = `Player ${index + 1}`;
+  if (socketId === lobby.hostId) {
+    return `${baseLabel} (Host)`;
+  }
+  return baseLabel;
+}
+
 function getLobbyRoomPayload(lobby, socketId) {
   return {
     id: lobby.id,
@@ -1437,6 +1476,7 @@ function getLobbyRoomPayload(lobby, socketId) {
     allowCheats: !!lobby.allowCheats,
     colorAssignments: lobby.colorAssignments || {},
     teamAssignments: lobby.teamAssignments || {},
+    chatLog: getLobbyChatHistory(lobby),
   };
 }
 
@@ -5666,6 +5706,53 @@ io.on("connection", (socket) => {
     broadcastLobbyList();
   });
 
+  socket.on("lobbyChat", (payload = {}, ack) => {
+    const lobbyId = payload.id || socket.lobbyId;
+    if (!lobbyId || !lobbies.has(lobbyId)) {
+      if (typeof ack === "function") {
+        ack({ ok: false, reason: "not_in_lobby" });
+      }
+      return;
+    }
+    const lobby = lobbies.get(lobbyId);
+    if (!lobby.players.includes(socket.id)) {
+      if (typeof ack === "function") {
+        ack({ ok: false, reason: "not_in_lobby" });
+      }
+      return;
+    }
+    const text = normalizeChatText(payload.text);
+    if (!text) {
+      if (typeof ack === "function") {
+        ack({ ok: false, reason: "empty_message" });
+      }
+      return;
+    }
+    if (!Array.isArray(lobby.chatLog)) {
+      lobby.chatLog = [];
+    }
+    const team = Number(lobby.teamAssignments?.[socket.id]);
+    const message = {
+      text,
+      senderId: socket.id,
+      senderLabel: getLobbySenderLabel(lobby, socket.id),
+      team: TEAM_OPTIONS.includes(team) ? team : TEAM_OPTIONS[0],
+      at: Date.now(),
+    };
+    lobby.chatLog.push(message);
+    if (lobby.chatLog.length > MAX_LOBBY_CHAT_MESSAGES) {
+      lobby.chatLog.splice(0, lobby.chatLog.length - MAX_LOBBY_CHAT_MESSAGES);
+    }
+    for (const lobbySocketId of lobby.players) {
+      const peer = io.sockets.sockets.get(lobbySocketId);
+      if (!peer || !peer.connected) continue;
+      peer.emit("lobbyChat", message);
+    }
+    if (typeof ack === "function") {
+      ack({ ok: true });
+    }
+  });
+
 
   socket.on("createLobby", (payload = {}, ack) => {
     if (socket.matchId && matches.has(socket.matchId)) {
@@ -5689,6 +5776,7 @@ io.on("connection", (socket) => {
       allowCheats: false,
       colorAssignments: {},
       teamAssignments: {},
+      chatLog: [],
       createdAt: Date.now(),
     };
     allocateLobbyColor(lobby, socket.id);
@@ -5877,7 +5965,42 @@ io.on("connection", (socket) => {
       }
       return;
     }
-    if (player.eliminated && payload.type !== "resign") return;
+    if (player.eliminated && payload.type !== "resign" && payload.type !== "chat") {
+      return;
+    }
+
+    if (payload.type === "chat") {
+      const text = normalizeChatText(payload.text);
+      if (!text) {
+        if (typeof ack === "function") {
+          ack({ ok: false, reason: "empty_message" });
+        }
+        return;
+      }
+      const scope = payload.scope === "all" ? "all" : "team";
+      const senderTeam = getPlayerTeam(match, player.index);
+      const message = {
+        text,
+        scope,
+        senderIndex: player.index,
+        senderLabel: `Player ${player.index + 1}`,
+        senderTeam,
+        at: Date.now(),
+      };
+      if (scope === "all") {
+        io.to(match.id).emit("chatMessage", message);
+      } else {
+        for (const teammate of match.players) {
+          if (!teammate?.id || teammate.eliminated) continue;
+          if (getPlayerTeam(match, teammate.index) !== senderTeam) continue;
+          io.to(teammate.id).emit("chatMessage", message);
+        }
+      }
+      if (typeof ack === "function") {
+        ack({ ok: true });
+      }
+      return;
+    }
 
     if (payload.type === "move" || payload.type === "attackMove") {
       const target = normalizeWorldPoint(payload.target);

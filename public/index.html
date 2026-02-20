@@ -23,16 +23,33 @@
         </div>
         <div id="lobby-room" class="hidden">
           <h2 id="lobby-room-name">Lobby</h2>
-          <div id="lobby-room-players"></div>
-          <div id="lobby-colors" class="lobby-colors"></div>
-          <div id="lobby-teams" class="lobby-teams"></div>
-          <label class="lobby-toggle">
-            <input id="lobby-cheats" type="checkbox" />
-            Allow Cheats
-          </label>
-          <div class="button-row">
-            <button id="start-lobby" disabled>Start Game</button>
-            <button id="leave-lobby" class="secondary">Leave Lobby</button>
+          <div id="lobby-room-content" class="lobby-room-content">
+            <div class="lobby-room-main">
+              <div id="lobby-room-players"></div>
+              <div id="lobby-colors" class="lobby-colors"></div>
+              <div id="lobby-teams" class="lobby-teams"></div>
+              <label class="lobby-toggle">
+                <input id="lobby-cheats" type="checkbox" />
+                Allow Cheats
+              </label>
+              <div class="button-row">
+                <button id="start-lobby" disabled>Start Game</button>
+                <button id="leave-lobby" class="secondary">Leave Lobby</button>
+              </div>
+            </div>
+            <aside class="lobby-chat-panel" aria-label="Lobby chat">
+              <div class="lobby-chat-title">Lobby Chat</div>
+              <div id="lobby-chat-log" class="lobby-chat-log"></div>
+              <form id="lobby-chat-form" class="lobby-chat-form" autocomplete="off">
+                <input
+                  id="lobby-chat-input"
+                  type="text"
+                  maxlength="220"
+                  placeholder="Send message to lobby"
+                />
+                <button type="submit" class="secondary">Send</button>
+              </form>
+            </aside>
           </div>
         </div>
         <div id="lobby-modal" class="modal hidden" tabindex="-1">
@@ -60,6 +77,18 @@
     <div id="research-notify" class="ui-layer"></div>
     <div id="age-notify" class="ui-layer"></div>
     <div id="player-list" class="ui-layer"></div>
+    <div id="game-chat" class="ui-layer hidden">
+      <div id="game-chat-log"></div>
+      <div id="game-chat-entry" class="hidden">
+        <input
+          id="game-chat-input"
+          type="text"
+          maxlength="220"
+          placeholder="Enter: team chat | Shift+Enter: all chat"
+          autocomplete="off"
+        />
+      </div>
+    </div>
 
     <canvas id="game"></canvas>
     <canvas id="minimap"></canvas>
