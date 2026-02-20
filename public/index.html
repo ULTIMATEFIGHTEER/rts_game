@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>RTS Prototype</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <div id="overlay" class="ui-layer">
+      <div class="panel">
+        <h1>Realm Skirmish</h1>
+        <div id="lobby-browser">
+          <p>Basic 2D RTS game. Create or join a lobby, or test in singleplayer mode.</p>
+          <div class="lobby-create">
+            <button id="create-lobby">Create Lobby</button>
+          </div>
+          <div id="lobby-list"></div>
+          <div class="button-row">
+            <button id="refresh-lobbies" class="secondary">Refresh</button>
+            <button id="singleplayer">Singleplayer</button>
+          </div>
+        </div>
+        <div id="lobby-room" class="hidden">
+          <h2 id="lobby-room-name">Lobby</h2>
+          <div id="lobby-room-players"></div>
+          <div id="lobby-colors" class="lobby-colors"></div>
+          <div id="lobby-teams" class="lobby-teams"></div>
+          <label class="lobby-toggle">
+            <input id="lobby-cheats" type="checkbox" />
+            Allow Cheats
+          </label>
+          <div class="button-row">
+            <button id="start-lobby" disabled>Start Game</button>
+            <button id="leave-lobby" class="secondary">Leave Lobby</button>
+          </div>
+        </div>
+        <div id="lobby-modal" class="modal hidden" tabindex="-1">
+          <div class="modal-content">
+            <h2>Create Lobby</h2>
+            <input id="lobby-name-input" type="text" maxlength="24" placeholder="Lobby name" />
+            <div class="button-row">
+              <button id="confirm-lobby">Create</button>
+              <button id="cancel-lobby" class="secondary">Cancel</button>
+            </div>
+          </div>
+        </div>
+        <div id="status">Idle</div>
+      </div>
+    </div>
+
+    <div id="hud" class="ui-layer">
+      <div id="resources"></div>
+      <div id="idle-villagers"></div>
+      <div id="idle-traders"></div>
+      <div id="hint">WASD/Arrow Keys to pan, Right click to move, F + click to Attack Move</div>
+    </div>
+    <div id="cheat-bar" class="ui-layer"></div>
+    <div id="attack-notify" class="ui-layer"></div>
+    <div id="research-notify" class="ui-layer"></div>
+    <div id="age-notify" class="ui-layer"></div>
+    <div id="player-list" class="ui-layer"></div>
+
+    <canvas id="game"></canvas>
+    <canvas id="minimap"></canvas>
+
+    <div id="bottom-bar" class="ui-layer">
+      <div id="selection-and-build">
+        <div id="selection-info">
+          <div id="selection-title">No selection</div>
+          <div id="selection-details">Select a unit or building to see details.</div>
+          <div id="error-banner" aria-live="polite"></div>
+        </div>
+        <div id="build-buttons">
+          <div class="build-column landmark-column" data-landmarks="1">
+            <div class="build-era">Landmarks</div>
+            <div class="build-row" data-category="landmark"></div>
+          </div>
+          <div class="build-column" data-era="0">
+            <div class="build-era">Copper Era</div>
+            <div class="build-row" data-category="economy"></div>
+            <div class="build-row" data-category="military"></div>
+            <div class="build-row" data-category="defensive"></div>
+          </div>
+          <div class="build-column" data-era="1">
+            <div class="build-era">Iron Era</div>
+            <div class="build-row" data-category="economy"></div>
+            <div class="build-row" data-category="military"></div>
+            <div class="build-row" data-category="defensive"></div>
+          </div>
+          <div class="build-column" data-era="2">
+            <div class="build-era">Diamond Era</div>
+            <div class="build-row" data-category="economy"></div>
+            <div class="build-row" data-category="military"></div>
+            <div class="build-row" data-category="defensive"></div>
+          </div>
+          <div class="build-column" data-era="3">
+            <div class="build-era">Emerald Era</div>
+            <div class="build-row" data-category="economy"></div>
+            <div class="build-row" data-category="military"></div>
+            <div class="build-row" data-category="defensive"></div>
+          </div>
+          <div class="build-column" data-era="4">
+            <div class="build-era">Enlightened Era</div>
+            <div class="build-row" data-category="economy"></div>
+            <div class="build-row" data-category="military"></div>
+            <div class="build-row" data-category="defensive"></div>
+          </div>
+        </div>
+      </div>
+      <div id="production-row">
+        <div id="production-buttons"></div>
+        <div id="production-queue"></div>
+      </div>
+      <div id="garrison-panel">
+        <div id="garrison-title">Garrisoned Units</div>
+        <div id="garrison-list"></div>
+        <button id="ungarrison-all">Ungarrison All</button>
+      </div>
+      <div id="build-tooltip"></div>
+    </div>
+
+    <div id="resign-modal" class="modal hidden">
+      <div class="modal-content">
+        <h2>Resign Match?</h2>
+        <p>Are you sure you want to resign?</p>
+        <div class="button-row">
+          <button id="confirm-resign">Resign</button>
+          <button id="cancel-resign" class="secondary">Cancel</button>
+        </div>
+      </div>
+    </div>
+
+    <script src="/socket.io/socket.io.js"></script>
+    <script type="module" src="./game.js"></script>
+  </body>
+</html>
