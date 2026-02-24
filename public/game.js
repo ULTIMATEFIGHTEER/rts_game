@@ -198,12 +198,28 @@ let repairArmed = false;
 const keys = new Set();
 const buildingImages = {};
 const landmarkRoleImages = {};
+const baseUnitModelImage = new Image();
+const tintedBaseUnitModelCache = new Map();
+const BASE_UNIT_MODEL_DRAW_SCALE = 4.9;
+const UNIT_RENDER_FACING_OFFSET = Math.PI / 2;
+const BASE_UNIT_MODEL_HAND_ANCHORS = Object.freeze({
+  left: Object.freeze({ x: 0.382, y: 0.341 }),
+  right: Object.freeze({ x: 0.625, y: 0.341 }),
+});
+const villagerWeaponImages = {};
+const VILLAGER_WEAPON_ICON_PATHS = Object.freeze({
+  axe: "/images/weapons/axe.png",
+  scythe: "/images/weapons/scythe.png",
+  pickaxe: "/images/weapons/pickaxe.png",
+  hammer: "/images/weapons/hammer.png",
+  knife: "/images/weapons/knife.png",
+});
 const LANDMARK_ROLE_ICON_PATHS = Object.freeze({
-  economic: "/images/economic.png",
-  military: "/images/military.png",
-  religious: "/images/religious.png",
-  technology: "/images/technology.png",
-  defensive: "/images/defensive.png",
+  economic: "/images/buildings/economic.png",
+  military: "/images/buildings/military.png",
+  religious: "/images/buildings/religious.png",
+  technology: "/images/buildings/technology.png",
+  defensive: "/images/buildings/defensive.png",
 });
 const unitRenderState = new Map();
 let lastStateUpdate = null;
@@ -403,6 +419,15 @@ function preloadImages() {
     const img = new Image();
     img.src = building.image;
     buildingImages[building.name] = img;
+  });
+  baseUnitModelImage.onload = () => {
+    tintedBaseUnitModelCache.clear();
+  };
+  baseUnitModelImage.src = "/images/base_unit_model.png";
+  Object.entries(VILLAGER_WEAPON_ICON_PATHS).forEach(([key, src]) => {
+    const img = new Image();
+    img.src = src;
+    villagerWeaponImages[key] = img;
   });
   Object.entries(LANDMARK_ROLE_ICON_PATHS).forEach(([role, src]) => {
     const img = new Image();
@@ -1302,6 +1327,7 @@ socket.on("matchStart", (payload) => {
   healArmed = false;
   repairArmed = false;
   unitRenderState.clear();
+  unitFacing.clear();
   unitLastHealth.clear();
   buildingLastHealth.clear();
   unitDamageTime.clear();
@@ -1322,6 +1348,7 @@ socket.on("matchStart", (payload) => {
       startTime: lastStateUpdate,
       duration: DEFAULT_INTERP_MS,
     });
+    unitFacing.set(unit.id, Number.isFinite(unit.facing) ? unit.facing : 0);
     unitLastHealth.set(unit.id, unit.health ?? unit.hp ?? 0);
   });
   buildings.forEach((building) => {
@@ -1390,6 +1417,9 @@ socket.on("stateUpdate", (payload) => {
       startTime: now,
       duration: interval,
     });
+    if (!unitFacing.has(unit.id)) {
+      unitFacing.set(unit.id, Number.isFinite(unit.facing) ? unit.facing : 0);
+    }
     seen.add(unit.id);
     const prev = prevUnits.get(unit.id);
     const prevHealth = prev ? prev.health ?? prev.hp ?? 0 : 0;
@@ -1404,6 +1434,11 @@ socket.on("stateUpdate", (payload) => {
   for (const id of unitRenderState.keys()) {
     if (!seen.has(id)) {
       unitRenderState.delete(id);
+    }
+  }
+  for (const id of unitFacing.keys()) {
+    if (!seen.has(id)) {
+      unitFacing.delete(id);
     }
   }
   for (const id of unitLastHealth.keys()) {
@@ -2148,7 +2183,326 @@ function drawNeutralBuildings() {
   });
 }
 
+function getTintedBaseUnitModelCanvas(color) {
+  if (!baseUnitModelImage.complete || baseUnitModelImage.naturalWidth <= 0) {
+    return null;
+  }
+  const key = String(color || "").toLowerCase();
+  const cached = tintedBaseUnitModelCache.get(key);
+  if (cached) return cached;
+
+  const width = baseUnitModelImage.naturalWidth;
+  const height = baseUnitModelImage.naturalHeight;
+  const sprite = document.createElement("canvas");
+  sprite.width = width;
+  sprite.height = height;
+  const spriteCtx = sprite.getContext("2d");
+  if (!spriteCtx) return null;
+
+  spriteCtx.clearRect(0, 0, width, height);
+  spriteCtx.drawImage(baseUnitModelImage, 0, 0, width, height);
+  // Tint strictly where the model image already has pixels.
+  spriteCtx.globalCompositeOperation = "source-atop";
+  spriteCtx.fillStyle = color;
+  spriteCtx.fillRect(0, 0, width, height);
+  spriteCtx.globalCompositeOperation = "source-over";
+  // Re-add line detail from source art after tinting.
+  spriteCtx.globalAlpha = 0.35;
+  spriteCtx.drawImage(baseUnitModelImage, 0, 0, width, height);
+  spriteCtx.globalAlpha = 1;
+
+  tintedBaseUnitModelCache.set(key, sprite);
+  return sprite;
+}
+
+function drawTintedBaseUnitModel(radius, color) {
+  const tintedModel = getTintedBaseUnitModelCanvas(color);
+  if (tintedModel) {
+    const size = radius * BASE_UNIT_MODEL_DRAW_SCALE;
+    const x = -size / 2;
+    const y = -size / 2;
+    ctx.drawImage(tintedModel, x, y, size, size);
+    return;
+  }
+  ctx.beginPath();
+  ctx.arc(0, 0, radius, 0, Math.PI * 2);
+  ctx.fillStyle = color;
+  ctx.fill();
+}
+
+function getBaseUnitHandPosition(radius, side = "right") {
+  const anchor =
+    side === "left" ? BASE_UNIT_MODEL_HAND_ANCHORS.left : BASE_UNIT_MODEL_HAND_ANCHORS.right;
+  const size = radius * BASE_UNIT_MODEL_DRAW_SCALE;
+  return {
+    x: (anchor.x - 0.5) * size,
+    y: (anchor.y - 0.5) * size,
+  };
+}
+
+function getUnitCurrentOrder(unit) {
+  if (!unit) return null;
+  return unit.activeOrder || unit.order || null;
+}
+
+function getVillagerWeaponKey(unit, resourceById) {
+  if (!unit || unit.type !== "Villager") return null;
+  const order = getUnitCurrentOrder(unit);
+  const orderType = order?.type || unit.orderType || null;
+
+  if (orderType === "build" || orderType === "repair") {
+    return "hammer";
+  }
+  if (orderType === "attack") {
+    return "knife";
+  }
+  if (orderType === "farm") {
+    return "scythe";
+  }
+
+  let resourceKind = null;
+  if (orderType === "gather" && order?.resourceId != null && resourceById) {
+    resourceKind = resourceById.get(order.resourceId)?.kind || null;
+  }
+  if (!resourceKind && unit.carry?.amount > 0) {
+    resourceKind = unit.carry.kind || null;
+  }
+  if (resourceKind === "wood") return "axe";
+  if (resourceKind === "food") return "scythe";
+  if (resourceKind === "gold" || resourceKind === "stone") return "pickaxe";
+  return null;
+}
+
+function getDistanceToBuildingEdge(unit, building) {
+  if (!unit || !building) return Infinity;
+  const def = BUILDINGS[building.type];
+  if (!def) return Infinity;
+  const targetX = clamp(unit.x, building.x, building.x + def.size);
+  const targetY = clamp(unit.y, building.y, building.y + def.size);
+  return Math.hypot(targetX - unit.x, targetY - unit.y);
+}
+
+function getDistanceToResourceEdge(unit, resourceNode) {
+  if (!unit || !resourceNode) return Infinity;
+  const targetX = clamp(unit.x, resourceNode.x, resourceNode.x + resourceNode.size);
+  const targetY = clamp(unit.y, resourceNode.y, resourceNode.y + resourceNode.size);
+  return Math.hypot(targetX - unit.x, targetY - unit.y);
+}
+
+function getUnitRadiusForRenderState(unit) {
+  const def = UNITS[unit?.type];
+  if (!def) return 0.3;
+  return def.type?.includes("Siege") ? 0.6 : 0.3;
+}
+
+function getDistanceToAttackTarget(unit, target) {
+  if (!unit || !target) return Infinity;
+  if (BUILDINGS[target.type]) {
+    return getDistanceToBuildingEdge(unit, target);
+  }
+  const centerDistance = Math.hypot((target.x || 0) - unit.x, (target.y || 0) - unit.y);
+  return Math.max(0, centerDistance - getUnitRadiusForRenderState(target));
+}
+
+function resolveOrderTargetEntity(order, buildingById, unitById) {
+  if (!order) return null;
+  if (order.unitId != null) {
+    return unitById?.get(order.unitId) || null;
+  }
+  if (order.buildingId != null) {
+    return buildingById?.get(order.buildingId) || null;
+  }
+  if (order.targetId != null) {
+    return unitById?.get(order.targetId) || buildingById?.get(order.targetId) || null;
+  }
+  return null;
+}
+
+function getVillagerWeaponAnimationMode(unit, weaponKey, resourceById, buildingById, unitById) {
+  const order = getUnitCurrentOrder(unit);
+  const orderType = order?.type || unit.orderType || null;
+  if (weaponKey === "hammer") {
+    if (orderType === "build" && order?.buildingId != null) {
+      const building = buildingById?.get(order.buildingId);
+      if (
+        building &&
+        building.isUnderConstruction &&
+        getDistanceToBuildingEdge(unit, building) <= 1.05
+      ) {
+        return "swing";
+      }
+    }
+    if (orderType === "repair") {
+      if (order?.buildingId != null) {
+        const building = buildingById?.get(order.buildingId);
+        if (
+          building &&
+          !building.isUnderConstruction &&
+          (building.hp || 0) < (building.maxHp || Infinity) &&
+          getDistanceToBuildingEdge(unit, building) <= 0.75
+        ) {
+          return "swing";
+        }
+      }
+      if (order?.unitId != null) {
+        const targetUnit = unitById?.get(order.unitId);
+        if (
+          targetUnit &&
+          (targetUnit.hp || 0) < (targetUnit.maxHp || Infinity) &&
+          getDistanceToAttackTarget(unit, targetUnit) <= 1.25
+        ) {
+          return "swing";
+        }
+      }
+    }
+    return "idle";
+  }
+  if (weaponKey === "axe") {
+    if (orderType === "gather" && order?.resourceId != null) {
+      const node = resourceById?.get(order.resourceId);
+      if (node?.kind === "wood" && getDistanceToResourceEdge(unit, node) <= 0.75) {
+        return "swing";
+      }
+    }
+    return "idle";
+  }
+  if (weaponKey === "pickaxe") {
+    if (orderType === "gather" && order?.resourceId != null) {
+      const node = resourceById?.get(order.resourceId);
+      if (
+        (node?.kind === "gold" || node?.kind === "stone") &&
+        getDistanceToResourceEdge(unit, node) <= 0.75
+      ) {
+        return "swing";
+      }
+    }
+    return "idle";
+  }
+  if (weaponKey === "scythe") {
+    if (orderType === "farm" && order?.buildingId != null) {
+      const farm = buildingById?.get(order.buildingId);
+      if (farm && farm.type === "Farm" && !farm.isUnderConstruction) {
+        const centerX = farm.x + BUILDINGS.Farm.size / 2;
+        const centerY = farm.y + BUILDINGS.Farm.size / 2;
+        if (Math.hypot(centerX - unit.x, centerY - unit.y) <= 0.25) {
+          return "swing";
+        }
+      }
+    }
+    if (orderType === "gather" && order?.resourceId != null) {
+      const node = resourceById?.get(order.resourceId);
+      if (node?.kind === "food" && getDistanceToResourceEdge(unit, node) <= 0.75) {
+        return "swing";
+      }
+    }
+    return "idle";
+  }
+  if (weaponKey === "knife") {
+    if (orderType !== "attack") return "idle";
+    const target = resolveOrderTargetEntity(order, buildingById, unitById);
+    if (!target) return "idle";
+    const villagerDef = UNITS.Villager || {};
+    let range = Number(villagerDef.range || 0.5);
+    if (range <= 0.6) range = 0.7;
+    const minRange = Math.max(0, Number(villagerDef.minRange || 0));
+    const distance = getDistanceToAttackTarget(unit, target);
+    if (!(distance <= range && distance >= minRange)) return "idle";
+    const baseCooldown = Math.max(0.001, Number(villagerDef.attackCooldown || 1));
+    const cooldownRatio = Math.max(0, Number(unit.attackCooldown || 0)) / baseCooldown;
+    return cooldownRatio >= 0.7 ? "stab" : "idle";
+  }
+  return "idle";
+}
+
+function drawVillagerWeaponOverlay(unit, radius, resourceById, buildingById, unitById) {
+  const weaponKey = getVillagerWeaponKey(unit, resourceById);
+  if (!weaponKey) return;
+  const weapon = villagerWeaponImages[weaponKey];
+  if (!weapon || !weapon.complete || weapon.naturalWidth <= 0) return;
+  const animationMode = getVillagerWeaponAnimationMode(
+    unit,
+    weaponKey,
+    resourceById,
+    buildingById,
+    unitById
+  );
+  const now = performance.now();
+  const numericId = Number(unit.id);
+  const phaseOffset = Number.isFinite(numericId) ? numericId * 0.77 : 0;
+  const leftHand = getBaseUnitHandPosition(radius, "left");
+  const rightHand = getBaseUnitHandPosition(radius, "right");
+  if (weaponKey === "axe" || weaponKey === "hammer") {
+    // These two tools are gripped with both hands across the chest.
+    const gripLeftX = leftHand.x - radius * 0.04;
+    const gripLeftY = leftHand.y + radius * 0.2;
+    const gripRightX = rightHand.x + radius * 0.04;
+    const gripRightY = rightHand.y + radius * 0.2;
+    const centerX = (gripLeftX + gripRightX) / 2;
+    const centerY = (gripLeftY + gripRightY) / 2;
+    const gripAngle = Math.atan2(gripRightY - gripLeftY, gripRightX - gripLeftX);
+    const size = Math.max(12, radius * (weaponKey === "axe" ? 1.72 : 1.66));
+    let drawX = centerX;
+    let drawY = centerY;
+    let drawRotation = gripAngle + (Math.PI * 5) / 4;
+    if (animationMode === "swing") {
+      const swing = Math.sin(now * 0.008 + phaseOffset);
+      const strikeForward = Math.max(0, swing);
+      drawRotation += swing * (weaponKey === "hammer" ? 0.62 : 0.52);
+      const thrust = strikeForward * radius * 0.12;
+      drawX += Math.cos(gripAngle) * thrust;
+      drawY += Math.sin(gripAngle) * thrust;
+    }
+    ctx.save();
+    ctx.translate(drawX, drawY);
+    // Source icons are drawn on a diagonal handle, so rotate to match the hand line.
+    ctx.rotate(drawRotation);
+    ctx.drawImage(weapon, -size / 2, -size / 2, size, size);
+    ctx.restore();
+    return;
+  }
+  const tweakByWeapon = {
+    axe: { x: 0.05, y: 0.26, size: 1.6 },
+    scythe: { x: 0.02, y: 0.22, size: 1.62 },
+    pickaxe: { x: 0.04, y: 0.24, size: 1.64 },
+    hammer: { x: 0.03, y: 0.2, size: 1.56 },
+    knife: { x: 0.02, y: 0.19, size: 1.42 },
+  };
+  const tweak = tweakByWeapon[weaponKey] || { x: 0.04, y: 0.22, size: 1.58 };
+  const size = Math.max(10, radius * tweak.size);
+  let x = rightHand.x + radius * tweak.x;
+  let y = rightHand.y + radius * tweak.y;
+  let rotation = 0;
+  if (animationMode === "swing") {
+    const speed = weaponKey === "pickaxe" ? 0.009 : 0.008;
+    const swing = Math.sin(now * speed + phaseOffset);
+    const strikeForward = Math.max(0, swing);
+    const arc = weaponKey === "pickaxe" ? 0.72 : 0.58;
+    rotation += swing * arc;
+    x += strikeForward * radius * 0.14;
+    y += strikeForward * radius * 0.05;
+  } else if (animationMode === "stab") {
+    const cycleMs = 130;
+    const cycle = ((now + phaseOffset * 37) % cycleMs) / cycleMs;
+    const thrust01 = cycle < 0.5 ? cycle * 2 : (1 - cycle) * 2;
+    const handLen = Math.hypot(x, y) || 1;
+    const dirX = x / handLen;
+    const dirY = y / handLen;
+    const thrust = thrust01 * radius * 0.46;
+    x += dirX * thrust;
+    y += dirY * thrust;
+    rotation += (thrust01 - 0.5) * 0.2;
+  }
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.rotate(rotation);
+  ctx.drawImage(weapon, -size / 2, -size / 2, size, size);
+  ctx.restore();
+}
+
 function drawUnits() {
+  const resourceById = new Map(resources.map((node) => [node.id, node]));
+  const buildingById = new Map(buildings.map((building) => [building.id, building]));
+  const unitById = new Map(units.map((u) => [u.id, u]));
   units.forEach((unit) => {
     if (
       playerIndex !== null &&
@@ -2183,7 +2537,7 @@ function drawUnits() {
       targetAngle = unit.facing;
     }
     if (targetAngle !== null) {
-      const turnRate = 0.18;
+      const turnRate = 0.22;
       const diff = normalizeAngle(targetAngle - angle);
       angle = angle + diff * turnRate;
       unitFacing.set(unit.id, angle);
@@ -2217,7 +2571,7 @@ function drawUnits() {
 
     ctx.save();
     ctx.translate(screen.x, screen.y);
-    ctx.rotate(angle);
+    ctx.rotate(angle + UNIT_RENDER_FACING_OFFSET);
 
     const color = getPlayerColor(unit.ownerId);
     if (isSiege) {
@@ -2285,11 +2639,14 @@ function drawUnits() {
       }
     }
     if (!isSiege) {
-      ctx.beginPath();
-      ctx.arc(0, 0, radius, 0, Math.PI * 2);
-      ctx.fillStyle = color;
-      ctx.fill();
+      drawTintedBaseUnitModel(radius, color);
     }
+
+    if (unit.type === "Villager") {
+      drawVillagerWeaponOverlay(unit, radius, resourceById, buildingById, unitById);
+    }
+    const leftHand = getBaseUnitHandPosition(radius, "left");
+    const rightHand = getBaseUnitHandPosition(radius, "right");
 
     if (unit.type === "Scout") {
       ctx.fillStyle = "#f1c40f";
@@ -2305,12 +2662,12 @@ function drawUnits() {
       ctx.strokeStyle = "#d8c6a1";
       ctx.lineWidth = 2;
       ctx.beginPath();
-      ctx.moveTo(-radius * 0.2, radius * 0.6);
-      ctx.lineTo(radius * 0.8, -radius * 0.7);
+      ctx.moveTo(leftHand.x - radius * 0.05, leftHand.y + radius * 0.12);
+      ctx.lineTo(rightHand.x + radius * 0.95, rightHand.y - radius * 0.95);
       ctx.stroke();
       ctx.fillStyle = "#c0c0c0";
       ctx.beginPath();
-      ctx.arc(radius * 0.8, -radius * 0.7, 2.2, 0, Math.PI * 2);
+      ctx.arc(rightHand.x + radius * 0.95, rightHand.y - radius * 0.95, 2.2, 0, Math.PI * 2);
       ctx.fill();
     } else if (unit.type === "ManAtArms") {
       ctx.fillStyle = "#7f8c8d";
@@ -2318,54 +2675,57 @@ function drawUnits() {
       ctx.strokeStyle = "#c0c0c0";
       ctx.lineWidth = 2;
       ctx.beginPath();
-      ctx.moveTo(-radius * 0.1, radius * 0.7);
-      ctx.lineTo(radius * 0.9, -radius * 0.6);
+      ctx.moveTo(rightHand.x - radius * 0.06, rightHand.y + radius * 0.14);
+      ctx.lineTo(rightHand.x + radius * 1, rightHand.y - radius * 0.86);
       ctx.stroke();
       ctx.fillStyle = "#c0c0c0";
       ctx.beginPath();
-      ctx.arc(radius * 0.95, -radius * 0.7, 2.2, 0, Math.PI * 2);
+      ctx.arc(rightHand.x + radius * 1.04, rightHand.y - radius * 0.91, 2.2, 0, Math.PI * 2);
       ctx.fill();
     } else if (unit.type === "Archer") {
       ctx.strokeStyle = "#c9a36a";
       ctx.lineWidth = 2;
       ctx.beginPath();
-      ctx.arc(radius * 0.5, -radius * 0.1, radius * 0.6, -Math.PI / 2, Math.PI / 2);
+      const bowX = rightHand.x + radius * 0.18;
+      const bowY = rightHand.y + radius * 0.58;
+      ctx.arc(bowX, bowY, radius * 0.6, -Math.PI / 2, Math.PI / 2);
       ctx.stroke();
       ctx.strokeStyle = "#f2e2c4";
       ctx.lineWidth = 1;
       ctx.beginPath();
-      ctx.moveTo(radius * 0.5, -radius * 0.7);
-      ctx.lineTo(radius * 0.5, radius * 0.5);
+      ctx.moveTo(bowX, bowY - radius * 0.6);
+      ctx.lineTo(bowX, bowY + radius * 0.6);
       ctx.stroke();
     } else if (unit.type === "Crossbowman") {
       ctx.strokeStyle = "#8e5a2b";
       ctx.lineWidth = 2;
       ctx.beginPath();
-      ctx.moveTo(-radius * 0.3, -radius * 0.1);
-      ctx.lineTo(radius * 0.6, -radius * 0.1);
+      const crossbowY = rightHand.y + radius * 0.18;
+      ctx.moveTo(leftHand.x - radius * 0.16, crossbowY);
+      ctx.lineTo(rightHand.x + radius * 0.58, crossbowY);
       ctx.stroke();
       ctx.strokeStyle = "#d8c6a1";
       ctx.lineWidth = 2;
       ctx.beginPath();
-      ctx.moveTo(radius * 0.2, -radius * 0.4);
-      ctx.lineTo(radius * 0.2, radius * 0.2);
+      ctx.moveTo(rightHand.x + radius * 0.22, crossbowY - radius * 0.32);
+      ctx.lineTo(rightHand.x + radius * 0.22, crossbowY + radius * 0.32);
       ctx.stroke();
       ctx.strokeStyle = "#f2e2c4";
       ctx.lineWidth = 1;
       ctx.beginPath();
-      ctx.moveTo(-radius * 0.1, -radius * 0.1);
-      ctx.lineTo(radius * 0.5, -radius * 0.1);
+      ctx.moveTo(leftHand.x - radius * 0.08, crossbowY);
+      ctx.lineTo(rightHand.x + radius * 0.4, crossbowY);
       ctx.stroke();
     } else if (unit.type === "Horseman") {
       ctx.strokeStyle = "#d8c6a1";
       ctx.lineWidth = 2;
       ctx.beginPath();
-      ctx.moveTo(-radius * 0.3, radius * 0.5);
-      ctx.lineTo(radius * 0.9, -radius * 0.6);
+      ctx.moveTo(rightHand.x - radius * 0.08, rightHand.y + radius * 0.14);
+      ctx.lineTo(rightHand.x + radius * 1.02, rightHand.y - radius * 0.96);
       ctx.stroke();
       ctx.fillStyle = "#c0c0c0";
       ctx.beginPath();
-      ctx.arc(radius * 0.9, -radius * 0.6, 2.2, 0, Math.PI * 2);
+      ctx.arc(rightHand.x + radius * 1.02, rightHand.y - radius * 0.96, 2.2, 0, Math.PI * 2);
       ctx.fill();
     } else if (unit.type === "Knight") {
       ctx.fillStyle = "#6c7a89";
@@ -2376,36 +2736,37 @@ function drawUnits() {
       ctx.strokeStyle = "#d8c6a1";
       ctx.lineWidth = 2;
       ctx.beginPath();
-      ctx.moveTo(-radius * 0.25, radius * 0.55);
-      ctx.lineTo(radius * 0.95, -radius * 0.65);
+      ctx.moveTo(rightHand.x - radius * 0.12, rightHand.y + radius * 0.1);
+      ctx.lineTo(rightHand.x + radius * 1.06, rightHand.y - radius * 1.01);
       ctx.stroke();
       ctx.fillStyle = "#c0c0c0";
       ctx.beginPath();
-      ctx.arc(radius * 0.95, -radius * 0.65, 2.2, 0, Math.PI * 2);
+      ctx.arc(rightHand.x + radius * 1.06, rightHand.y - radius * 1.01, 2.2, 0, Math.PI * 2);
       ctx.fill();
     } else if (unit.type === "Handcannoneer") {
       ctx.strokeStyle = "#4d4d4d";
       ctx.lineWidth = 3;
       ctx.beginPath();
-      ctx.moveTo(-radius * 0.2, -radius * 0.1);
-      ctx.lineTo(radius * 0.9, -radius * 0.1);
+      const gunY = rightHand.y + radius * 0.15;
+      ctx.moveTo(leftHand.x - radius * 0.06, gunY);
+      ctx.lineTo(rightHand.x + radius * 0.78, gunY);
       ctx.stroke();
       ctx.strokeStyle = "#c0c0c0";
       ctx.lineWidth = 2;
       ctx.beginPath();
-      ctx.moveTo(radius * 0.6, -radius * 0.2);
-      ctx.lineTo(radius * 0.9, -radius * 0.2);
+      ctx.moveTo(rightHand.x + radius * 0.48, gunY - radius * 0.12);
+      ctx.lineTo(rightHand.x + radius * 0.78, gunY - radius * 0.12);
       ctx.stroke();
     } else if (unit.type === "Monk") {
       ctx.strokeStyle = "#f1c40f";
       ctx.lineWidth = 3;
       ctx.beginPath();
-      ctx.moveTo(-radius * 0.15, radius * 0.65);
-      ctx.lineTo(radius * 0.75, -radius * 0.75);
+      ctx.moveTo(leftHand.x + radius * 0.02, leftHand.y + radius * 0.12);
+      ctx.lineTo(rightHand.x + radius * 0.82, rightHand.y - radius * 1.08);
       ctx.stroke();
       ctx.fillStyle = "#f7dc6f";
       ctx.beginPath();
-      ctx.arc(radius * 0.78, -radius * 0.78, 2.5, 0, Math.PI * 2);
+      ctx.arc(rightHand.x + radius * 0.85, rightHand.y - radius * 1.12, 2.5, 0, Math.PI * 2);
       ctx.fill();
     }
 
@@ -2419,6 +2780,8 @@ function drawUnits() {
     if (isSelected) {
       ctx.strokeStyle = "#ffffff";
       ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(0, 0, Math.max(radius * 1.05, 8), 0, Math.PI * 2);
       ctx.stroke();
     }
 
@@ -6806,3 +7169,4 @@ function renderProductionButtons(buildingList) {
   });
   }
 }
+

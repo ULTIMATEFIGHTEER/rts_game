@@ -26,10 +26,10 @@ textarea {
 
 #minimap {
   position: fixed;
-  right: 16px;
-  bottom: 130px;
-  width: 200px;
-  height: 200px;
+  right: clamp(8px, 1.4vw, 16px);
+  bottom: max(130px, 14vh);
+  width: clamp(150px, 18vw, 200px);
+  height: clamp(150px, 18vw, 200px);
   border: 2px solid rgba(140, 140, 140, 0.9);
   border-radius: 8px;
   background: rgba(18, 20, 24, 0.9);
@@ -468,8 +468,8 @@ textarea {
 
 #hud {
   position: fixed;
-  top: 12px;
-  left: 12px;
+  top: clamp(8px, 1.2vw, 12px);
+  left: clamp(8px, 1.2vw, 12px);
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -479,10 +479,11 @@ textarea {
 
 #player-list {
   position: fixed;
-  right: 16px;
+  right: clamp(8px, 1.2vw, 16px);
   top: 50%;
   transform: translateY(-50%);
-  min-width: 150px;
+  min-width: 140px;
+  max-width: min(240px, 44vw);
   padding: 8px 10px;
   border-radius: 10px;
   background: rgba(12, 14, 18, 0.85);
@@ -502,8 +503,8 @@ textarea {
 
 #game-chat {
   position: fixed;
-  right: 14px;
-  top: 14px;
+  right: clamp(8px, 1.2vw, 14px);
+  top: clamp(8px, 1.2vw, 14px);
   width: min(400px, calc(100vw - 28px));
   display: flex;
   flex-direction: column;
@@ -584,8 +585,8 @@ textarea {
 
 #cheat-bar {
   position: fixed;
-  top: 12px;
-  right: 12px;
+  top: clamp(8px, 1.2vw, 12px);
+  right: clamp(8px, 1.2vw, 12px);
   display: none;
   flex-direction: column;
   align-items: flex-end;
@@ -725,11 +726,11 @@ textarea {
 }
 
 #resources {
-  font-size: 16px;
+  font-size: clamp(13px, 1.25vw, 16px);
   padding: 6px 10px;
   background: rgba(15, 18, 22, 0.7);
   border-radius: 8px;
-  min-width: 210px;
+  min-width: min(210px, 44vw);
   pointer-events: auto;
 }
 
@@ -772,7 +773,7 @@ textarea {
 }
 
 #hint {
-  font-size: 13px;
+  font-size: clamp(11px, 1.05vw, 13px);
   color: rgba(255, 255, 255, 0.6);
 }
 
@@ -1127,9 +1128,166 @@ textarea {
     max-height: 220px;
   }
 
+  #hud {
+    gap: 6px;
+  }
+
+  #resources {
+    min-width: 0;
+    max-width: 56vw;
+    padding: 5px 8px;
+  }
+
+  #hint {
+    max-width: 56vw;
+  }
+
   #game-chat {
     right: 8px;
     top: 8px;
     width: min(360px, calc(100vw - 16px));
+  }
+
+  #game-chat-log {
+    max-height: 160px;
+    font-size: 11px;
+  }
+
+  #player-list {
+    top: 210px;
+    transform: none;
+    max-height: 30vh;
+    overflow-y: auto;
+    font-size: 11px;
+    max-width: min(220px, 46vw);
+  }
+
+  #cheat-bar {
+    max-width: min(360px, 62vw);
+  }
+
+  #minimap {
+    right: 10px;
+    width: clamp(122px, 20vw, 156px);
+    height: clamp(122px, 20vw, 156px);
+    bottom: clamp(180px, 32vh, 240px);
+  }
+
+  #bottom-bar {
+    padding: 8px 10px;
+    gap: 5px;
+    max-height: 34vh;
+    overflow-y: auto;
+  }
+
+  #selection-and-build {
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  #selection-title {
+    font-size: 16px;
+  }
+
+  #selection-details {
+    font-size: 12px;
+  }
+
+  #production-row {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  #production-buttons {
+    width: 100%;
+  }
+
+  #production-queue {
+    min-width: 0;
+    width: 100%;
+    max-height: 96px;
+  }
+
+  #build-buttons {
+    gap: 8px;
+  }
+
+  .build-column {
+    min-width: 130px;
+  }
+
+  .build-era {
+    font-size: 11px;
+  }
+
+  #garrison-panel {
+    width: 100%;
+  }
+}
+
+@media (max-width: 640px), (max-height: 620px) {
+  #hint {
+    display: none;
+  }
+
+  #resources {
+    max-width: calc(100vw - 16px);
+    font-size: 12px;
+  }
+
+  #idle-villagers,
+  #idle-traders {
+    font-size: 11px;
+    padding: 3px 6px;
+  }
+
+  #game-chat {
+    right: 8px;
+    left: 8px;
+    width: auto;
+    top: 8px;
+  }
+
+  #game-chat-log {
+    max-height: 132px;
+  }
+
+  #player-list {
+    top: 154px;
+    right: 8px;
+    max-width: min(180px, 48vw);
+    max-height: 22vh;
+  }
+
+  #cheat-bar {
+    top: 154px;
+    right: 8px;
+    max-width: min(280px, 58vw);
+  }
+
+  #minimap {
+    width: clamp(102px, 24vw, 126px);
+    height: clamp(102px, 24vw, 126px);
+    right: 8px;
+    bottom: clamp(170px, 34vh, 220px);
+  }
+
+  #bottom-bar {
+    max-height: 32vh;
+    padding: 6px 8px;
+  }
+
+  .build-column {
+    min-width: 118px;
+  }
+
+  .build-btn {
+    width: 42px;
+    height: 42px;
+  }
+
+  .build-btn img {
+    width: 30px;
+    height: 30px;
   }
 }

@@ -63,6 +63,10 @@ const FORMATION_UNIT_AVOIDANCE_STRENGTH = 0.08;
 const FORMATION_SAME_FORMATION_AVOIDANCE_FACTOR = 0.05;
 const FORMATION_AVOIDANCE_SCALE = 0.75;
 const FORMATION_COLLISION_FACTOR = 0.82;
+const WORKER_TASK_COLLISION_FACTOR = 0.62;
+const WORKER_TASK_AVOIDANCE_FACTOR = 0.08;
+const GATHER_APPROACH_COLLISION_FACTOR = 0.1;
+const GATHER_APPROACH_AVOIDANCE_FACTOR = 0;
 const BASE_POPULATION_CAP = 20;
 const HOUSE_POPULATION_BONUS = 10;
 const MAX_POPULATION_CAP = 200;
@@ -2314,6 +2318,72 @@ function getUnitRadius(unit) {
   return def.type?.includes("Siege") ? 0.6 : 0.3;
 }
 
+function isGatherVillagerInWorkRange(unit, resource) {
+  if (!unit || !resource) return false;
+  const targetX = clamp(unit.x, resource.x, resource.x + resource.size);
+  const targetY = clamp(unit.y, resource.y, resource.y + resource.size);
+  return Math.hypot(targetX - unit.x, targetY - unit.y) <= 0.75;
+}
+
+function getVillagerTaskCohesionType(a, b, resourceById = null) {
+  if (!a || !b) return "none";
+  if (a.type !== "Villager" || b.type !== "Villager") return "none";
+  const orderA = a.order;
+  const orderB = b.order;
+  if (!orderA || !orderB) return "none";
+  if (orderA.type !== orderB.type) return "none";
+
+  switch (orderA.type) {
+    case "gather": {
+      if (
+        orderA.resourceId === null ||
+        orderA.resourceId === undefined ||
+        orderA.resourceId !== orderB.resourceId
+      ) {
+        return "none";
+      }
+      const node = resourceById?.get(orderA.resourceId) || null;
+      if (!node) return "gather_approach";
+      const aInRange = isGatherVillagerInWorkRange(a, node);
+      const bInRange = isGatherVillagerInWorkRange(b, node);
+      // Keep them tight while approaching. Once both are in gather range, let them spread.
+      return aInRange && bInRange ? "none" : "gather_approach";
+    }
+    case "build":
+    case "farm":
+      if (
+        orderA.buildingId !== null &&
+        orderA.buildingId !== undefined &&
+        orderA.buildingId === orderB.buildingId
+      ) {
+        return "task";
+      }
+      return "none";
+    case "repair":
+      if (
+        orderA.buildingId !== null &&
+        orderA.buildingId !== undefined &&
+        orderB.buildingId !== null &&
+        orderB.buildingId !== undefined &&
+        orderA.buildingId === orderB.buildingId
+      ) {
+        return "task";
+      }
+      if (
+        orderA.unitId !== null &&
+        orderA.unitId !== undefined &&
+        orderB.unitId !== null &&
+        orderB.unitId !== undefined &&
+        orderA.unitId === orderB.unitId
+      ) {
+        return "task";
+      }
+      return "none";
+    default:
+      return "none";
+  }
+}
+
 function getUnitMaxHp(unit) {
   if (!unit) return 1;
   return unit.maxHp ?? UNITS[unit.type]?.health ?? 1;
@@ -2614,6 +2684,23 @@ function breakFormation(match, formationId) {
   }
 }
 
+function moveWithStandardOrderLogic(match, unit, targetX, targetY, dt, extraOptions = {}) {
+  const inFormation = !!unit.order?.formationId;
+  const orderType = unit.order?.type || "move";
+  moveUnitWithPath(match, unit, targetX, targetY, dt, {
+    speedOverride: unit.order?.formationSpeed,
+    repathTicks: orderType === "attackMove" ? 20 : 60,
+    unitAvoidanceStrength: inFormation
+      ? FORMATION_UNIT_AVOIDANCE_STRENGTH
+      : 0.2,
+    sameFormationAvoidanceFactor: inFormation
+      ? FORMATION_SAME_FORMATION_AVOIDANCE_FACTOR
+      : 0.12,
+    avoidanceScale: inFormation ? FORMATION_AVOIDANCE_SCALE : 0.9,
+    ...extraOptions,
+  });
+}
+
 function processMovement(match, dt) {
   const garrisonArrivals = [];
   for (const unit of match.units) {
@@ -2725,11 +2812,7 @@ function processMovement(match, dt) {
       );
       const distance = Math.hypot(targetX - unit.x, targetY - unit.y);
       if (distance > 0.6) {
-        moveUnitWithPath(match, unit, targetX, targetY, dt, {
-          ignoreBuildingId: building.id,
-          repathTicks: 20,
-          unitAvoidanceStrength: 0.16,
-        });
+        moveWithStandardOrderLogic(match, unit, targetX, targetY, dt);
       }
       continue;
     }
@@ -2764,10 +2847,7 @@ function processMovement(match, dt) {
         );
         const distance = Math.hypot(targetX - unit.x, targetY - unit.y);
         if (distance > 0.75) {
-          moveUnitWithPath(match, unit, targetX, targetY, dt, {
-            ignoreBuildingId: building.id,
-            includeUnitAvoidance: false,
-          });
+          moveWithStandardOrderLogic(match, unit, targetX, targetY, dt);
         }
         continue;
       }
@@ -2788,9 +2868,13 @@ function processMovement(match, dt) {
         }
         const distance = Math.hypot(targetUnit.x - unit.x, targetUnit.y - unit.y);
         if (distance > 1.25) {
-          moveUnitWithPath(match, unit, targetUnit.x, targetUnit.y, dt, {
-            includeUnitAvoidance: false,
-          });
+          moveWithStandardOrderLogic(
+            match,
+            unit,
+            targetUnit.x,
+            targetUnit.y,
+            dt
+          );
         }
         continue;
       }
@@ -2804,21 +2888,17 @@ function processMovement(match, dt) {
         unit.order = null;
         continue;
       }
-      const targetX = clamp(
-        unit.x,
-        building.x,
-        building.x + BUILDINGS.Farm.size
-      );
-      const targetY = clamp(
-        unit.y,
-        building.y,
-        building.y + BUILDINGS.Farm.size
-      );
+      const targetX = building.x + BUILDINGS.Farm.size / 2;
+      const targetY = building.y + BUILDINGS.Farm.size / 2;
       const distance = Math.hypot(targetX - unit.x, targetY - unit.y);
-      if (distance > 0.6) {
-        moveUnitWithPath(match, unit, targetX, targetY, dt, {
+      if (distance > 0.2) {
+        moveWithStandardOrderLogic(match, unit, targetX, targetY, dt, {
           ignoreBuildingId: building.id,
         });
+      } else {
+        // Keep farmers centered on top of the farm while gathering.
+        unit.x = targetX;
+        unit.y = targetY;
       }
       continue;
     }
@@ -2829,13 +2909,13 @@ function processMovement(match, dt) {
         unit.order = null;
         continue;
       }
-      const centerX = target.x + target.size / 2;
-      const centerY = target.y + target.size / 2;
-      const distance = Math.hypot(centerX - unit.x, centerY - unit.y);
-      if (distance > 0.6) {
-        moveUnitWithPath(match, unit, centerX, centerY, dt, {
-          ignoreResourceId: target.id,
-        });
+      const edgeX = clamp(unit.x, target.x, target.x + target.size);
+      const edgeY = clamp(unit.y, target.y, target.y + target.size);
+      const distance = Math.hypot(edgeX - unit.x, edgeY - unit.y);
+      if (distance > 0.75) {
+        const centerX = target.x + target.size / 2;
+        const centerY = target.y + target.size / 2;
+        moveWithStandardOrderLogic(match, unit, centerX, centerY, dt);
       }
       continue;
     }
@@ -3062,18 +3142,7 @@ function processMovement(match, dt) {
       continue;
     }
 
-    const inFormation = !!unit.order.formationId;
-    moveUnitWithPath(match, unit, targetX, targetY, dt, {
-      speedOverride: unit.order.formationSpeed,
-      repathTicks: unit.order.type === "attackMove" ? 20 : 60,
-      unitAvoidanceStrength: inFormation
-        ? FORMATION_UNIT_AVOIDANCE_STRENGTH
-        : 0.2,
-      sameFormationAvoidanceFactor: inFormation
-        ? FORMATION_SAME_FORMATION_AVOIDANCE_FACTOR
-        : 0.12,
-      avoidanceScale: inFormation ? FORMATION_AVOIDANCE_SCALE : 0.9,
-    });
+    moveWithStandardOrderLogic(match, unit, targetX, targetY, dt);
   }
 
   if (garrisonArrivals.length) {
@@ -3609,7 +3678,13 @@ function processCombat(match, dt) {
     if (!def) continue;
     if (def.isNeutral || def.isInvulnerable || building.ownerId === null) continue;
     if (isDestroyedLandmark(building)) continue;
-    if (building.isUnderConstruction && isDefensiveBuildingType(building.type)) continue;
+    if (
+      building.isUnderConstruction &&
+      (isDefensiveBuildingType(building.type) || isLandmarkBuildingType(building.type))
+    ) {
+      building.attackTargetId = null;
+      continue;
+    }
     const attackProfiles = getBuildingAttackProfiles(building, def);
     if (!attackProfiles.length) continue;
     const cooldowns = building.attackCooldowns || (building.attackCooldowns = {});
@@ -4374,32 +4449,18 @@ function processGathering(match, dt) {
       }
       building.farmerId = unit.id;
 
-      const targetX = clamp(unit.x, building.x, building.x + BUILDINGS.Farm.size);
-      const targetY = clamp(unit.y, building.y, building.y + BUILDINGS.Farm.size);
+      const targetX = building.x + BUILDINGS.Farm.size / 2;
+      const targetY = building.y + BUILDINGS.Farm.size / 2;
       const distance = Math.hypot(targetX - unit.x, targetY - unit.y);
-      if (distance > 0.75) {
+      if (distance > 0.25) {
         continue;
       }
 
       const capacity = getCarryCapacity(match, unit.ownerId);
       if (unit.carry.kind && unit.carry.kind !== "food") {
-        const dropoff = findDropoffBuilding(
-          match,
-          unit.ownerId,
-          unit.carry.kind,
-          unit.x,
-          unit.y
-        );
-        if (dropoff) {
-          unit.order = {
-            type: "return",
-            buildingId: dropoff.id,
-            returnFarmId: building.id,
-          };
-        } else {
-          unit.order = null;
-        }
-        continue;
+        // Re-tasking to a different resource destroys carried resources instead of forcing drop-off.
+        unit.carry.amount = 0;
+        unit.carry.kind = null;
       }
 
       const availableCarry = capacity - (unit.carry.amount || 0);
@@ -4507,23 +4568,9 @@ function processGathering(match, dt) {
 
     const capacity = getCarryCapacity(match, unit.ownerId);
     if (unit.carry.kind && unit.carry.kind !== node.kind) {
-      const dropoff = findDropoffBuilding(
-        match,
-        unit.ownerId,
-        unit.carry.kind,
-        unit.x,
-        unit.y
-      );
-      if (dropoff) {
-        unit.order = {
-          type: "return",
-          buildingId: dropoff.id,
-          returnResourceId: unit.order.resourceId,
-        };
-      } else {
-        unit.order = null;
-      }
-      continue;
+      // Re-tasking to a different resource destroys carried resources instead of forcing drop-off.
+      unit.carry.amount = 0;
+      unit.carry.kind = null;
     }
 
     const gatherRate = getGatherRate(match, unit, node.kind);
@@ -4599,6 +4646,7 @@ function processGathering(match, dt) {
 }
 
 function resolveUnitCollisions(match) {
+  const resourceById = new Map(match.resources.map((node) => [node.id, node]));
   for (let i = 0; i < match.units.length; i++) {
     const a = match.units[i];
     for (let j = i + 1; j < match.units.length; j++) {
@@ -4607,9 +4655,19 @@ function resolveUnitCollisions(match) {
         a.order?.formationId &&
         b.order?.formationId &&
         a.order.formationId === b.order.formationId;
+      const taskCohesion = sameFormation
+        ? "none"
+        : getVillagerTaskCohesionType(a, b, resourceById);
+      const spacingFactor = sameFormation
+        ? FORMATION_COLLISION_FACTOR
+        : taskCohesion === "gather_approach"
+        ? GATHER_APPROACH_COLLISION_FACTOR
+        : taskCohesion === "task"
+        ? WORKER_TASK_COLLISION_FACTOR
+        : 1;
       const minDist =
         (getUnitRadius(a) + getUnitRadius(b)) *
-        (sameFormation ? FORMATION_COLLISION_FACTOR : 1);
+        spacingFactor;
       const minDistSq = minDist * minDist;
       let dx = b.x - a.x;
       let dy = b.y - a.y;
@@ -4643,6 +4701,10 @@ function getAvoidanceVector(unit, match, options = {}) {
   const unitAvoidanceStrength = options.unitAvoidanceStrength ?? 0.24;
   const sameFormationAvoidanceFactor =
     options.sameFormationAvoidanceFactor ?? 0.2;
+  const sameWorkerTaskAvoidanceFactor =
+    options.sameWorkerTaskAvoidanceFactor ?? WORKER_TASK_AVOIDANCE_FACTOR;
+  const gatherApproachAvoidanceFactor =
+    options.gatherApproachAvoidanceFactor ?? GATHER_APPROACH_AVOIDANCE_FACTOR;
   const pushFromPoint = (px, py, avoidRadius) => {
     let dx = unit.x - px;
     let dy = unit.y - py;
@@ -4675,6 +4737,7 @@ function getAvoidanceVector(unit, match, options = {}) {
   }
 
   if (options.includeUnitAvoidance) {
+    const resourceById = new Map(match.resources.map((node) => [node.id, node]));
     for (const other of match.units) {
       if (other.id === unit.id) continue;
       const dx = unit.x - other.x;
@@ -4686,8 +4749,15 @@ function getAvoidanceVector(unit, match, options = {}) {
           unit.order?.formationId &&
           other.order?.formationId &&
           unit.order.formationId === other.order.formationId;
+        const taskCohesion = sameFormation
+          ? "none"
+          : getVillagerTaskCohesionType(unit, other, resourceById);
         const formationFactor = sameFormation
           ? sameFormationAvoidanceFactor
+          : taskCohesion === "gather_approach"
+          ? gatherApproachAvoidanceFactor
+          : taskCohesion === "task"
+          ? sameWorkerTaskAvoidanceFactor
           : 1;
         const strength = (avoidRadius - dist) / avoidRadius;
         result.x +=
@@ -6128,6 +6198,13 @@ io.on("connection", (socket) => {
       for (const building of selectedBuildings) {
         const buildingDef = BUILDINGS[building.type];
         if (!buildingDef || buildingDef.isNeutral || buildingDef.isInvulnerable) {
+          continue;
+        }
+        if (
+          building.isUnderConstruction &&
+          (isDefensiveBuildingType(building.type) || isLandmarkBuildingType(building.type))
+        ) {
+          building.attackTargetId = null;
           continue;
         }
         const attackProfiles = getBuildingAttackProfiles(building, buildingDef);
