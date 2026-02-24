@@ -1607,6 +1607,8 @@ function findDropoffBuilding(match, ownerId, kind, fromX, fromY) {
   let bestDist = Infinity;
   for (const building of match.buildings) {
     if (building.ownerId !== ownerId) continue;
+    // Farms are gather targets, not valid drop-off points.
+    if (building.type === "Farm") continue;
     if (!isBuildingFunctional(building)) continue;
     const def = BUILDINGS[building.type];
     if (!def) continue;

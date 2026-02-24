@@ -77,7 +77,6 @@ export const BUILDINGS = {
     health: 300,
     buildTime: 6,
     cost: { wood: 75 },
-    accepts: ["food"],
     image: "/images/buildings/farm.png",
     sight: DEFAULT_SIGHT,
     rangedArmor: DEFAULT_BUILDING_RANGED_ARMOR,
